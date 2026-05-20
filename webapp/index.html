@@ -1,1 +1,540 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ОЦІНКА24 — Web App</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --brand:   #1a56a0;
+    --brand2:  #0e3a72;
+    --green:   #27ae60;
+    --red:     #e74c3c;
+    --bg:      #f4f7fb;
+    --card:    #ffffff;
+    --text:    #1a1a2e;
+    --muted:   #6b7280;
+    --radius:  14px;
+    --shadow:  0 4px 20px rgba(26,86,160,.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 16px;
+  }
 
+  /* ── Header ── */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--brand);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+  }
+  .header img { width: 44px; height: 44px; border-radius: 8px; object-fit: contain; background:#fff; padding:2px; }
+  .header-text h1 { color: #fff; font-size: 18px; font-weight: 700; line-height: 1.2; }
+  .header-text p  { color: rgba(255,255,255,.75); font-size: 12px; margin-top: 2px; }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex;
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 5px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow);
+    gap: 4px;
+  }
+  .tab {
+    flex: 1;
+    padding: 10px 6px;
+    border: none;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .2s;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+  }
+  .tab .icon { font-size: 20px; }
+  .tab.active {
+    background: var(--brand);
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(26,86,160,.3);
+  }
+
+  /* ── Panel ── */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ── Card ── */
+  .card {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: var(--shadow);
+  }
+  .card h2 { font-size: 16px; font-weight: 700; margin-bottom: 8px; color: var(--brand); }
+  .card p  { font-size: 14px; color: var(--muted); line-height: 1.5; }
+
+  /* ── Button ── */
+  .btn {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 12px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: all .2s;
+    margin-top: 12px;
+  }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-primary:active { background: var(--brand2); transform: scale(.98); }
+  .btn-success { background: var(--green); color: #fff; }
+  .btn-success:active { opacity: .85; transform: scale(.98); }
+  .btn-danger  { background: var(--red); color: #fff; }
+  .btn-danger:active  { opacity: .85; transform: scale(.98); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; transform: none !important; }
+
+  /* ── Status box ── */
+  .status {
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-top: 12px;
+    display: none;
+    align-items: center;
+    gap: 8px;
+  }
+  .status.info    { background: #e8f0fe; color: var(--brand); display: flex; }
+  .status.success { background: #d4edda; color: #155724;      display: flex; }
+  .status.error   { background: #f8d7da; color: #721c24;      display: flex; }
+
+  /* ── Map preview ── */
+  #map-preview {
+    width: 100%;
+    height: 180px;
+    border-radius: 10px;
+    border: 2px solid #e2e8f0;
+    margin-top: 12px;
+    display: none;
+    overflow: hidden;
+  }
+  #map-preview iframe { width: 100%; height: 100%; border: none; }
+
+  /* ── Coords box ── */
+  .coords-box {
+    background: #f0f4ff;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 12px;
+    display: none;
+  }
+  .coords-box .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .coords-box .value { font-size: 15px; font-weight: 700; color: var(--brand); font-family: monospace; }
+
+  /* ── Video preview ── */
+  #video-preview {
+    width: 100%;
+    border-radius: 10px;
+    background: #000;
+    display: none;
+    margin-top: 12px;
+    max-height: 280px;
+    object-fit: cover;
+  }
+  #recorded-preview {
+    width: 100%;
+    border-radius: 10px;
+    margin-top: 12px;
+    display: none;
+    max-height: 280px;
+  }
+
+  /* ── Timer ── */
+  .timer {
+    text-align: center;
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--red);
+    margin: 8px 0;
+    display: none;
+    font-family: monospace;
+    letter-spacing: .05em;
+  }
+
+  /* ── Steps ── */
+  .steps { display: flex; flex-direction: column; gap: 10px; }
+  .step  {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: #f8faff;
+    border-radius: 10px;
+    border: 1.5px solid #e2e8f0;
+  }
+  .step-icon { font-size: 22px; flex-shrink: 0; }
+  .step-text { font-size: 13px; line-height: 1.4; }
+  .step-text strong { font-size: 14px; display: block; margin-bottom: 2px; }
+  .step.done { background: #d4edda; border-color: #a3d9a5; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="header">
+  <img src="https://ocenka24.com.ua/img/ocenka24-logo.png"
+       onerror="this.style.display='none'" alt="ОЦІНКА24">
+  <div class="header-text">
+    <h1>ОЦІНКА24</h1>
+    <p>Передача матеріалів для оцінки</p>
+  </div>
+</div>
+
+<!-- ── Tabs ── -->
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('geo')">
+    <span class="icon">📍</span>Геолокація
+  </button>
+  <button class="tab" onclick="switchTab('video')">
+    <span class="icon">🎥</span>Відео-огляд
+  </button>
+  <button class="tab" onclick="switchTab('help')">
+    <span class="icon">❓</span>Як це?
+  </button>
+</div>
+
+<!-- ══════════ ПАНЕЛЬ 1 — ГЕОЛОКАЦІЯ ══════════ -->
+<div id="panel-geo" class="panel active">
+  <div class="card">
+    <h2>📍 Геолокація об'єкта</h2>
+    <p>Перебуваючи біля об'єкта оцінки, натисніть кнопку нижче. Ваші координати будуть надіслані оцінювачу.</p>
+  </div>
+
+  <div class="card">
+    <div id="geo-status" class="status info">
+      <span>📡</span> Готово до визначення координат
+    </div>
+    <div class="coords-box" id="coords-box">
+      <div class="label">Координати</div>
+      <div class="value" id="coords-value">—</div>
+      <div class="label" style="margin-top:6px">Точність</div>
+      <div class="value" id="accuracy-value">—</div>
+    </div>
+    <div id="map-preview">
+      <iframe id="map-iframe" src="" allowfullscreen></iframe>
+    </div>
+    <button class="btn btn-primary" id="btn-locate" onclick="getLocation()">
+      📍 Визначити моє місцезнаходження
+    </button>
+    <button class="btn btn-success" id="btn-send-geo" onclick="sendLocation()" disabled>
+      ✅ Надіслати оцінювачу
+    </button>
+  </div>
+</div>
+
+<!-- ══════════ ПАНЕЛЬ 2 — ВІДЕО ══════════ -->
+<div id="panel-video" class="panel">
+  <div class="card">
+    <h2>🎥 Відео-огляд об'єкта</h2>
+    <p>Запишіть коротке відео об'єкта оцінки (до 2 хвилин). Покажіть фасад, всі кімнати, вхід.</p>
+  </div>
+
+  <div class="card">
+    <video id="video-preview" autoplay muted playsinline></video>
+    <video id="recorded-preview" controls></video>
+    <div class="timer" id="rec-timer">⏺ 00:00</div>
+    <div id="video-status" class="status info">
+      <span>💡</span> Натисніть «Почати запис»
+    </div>
+    <button class="btn btn-primary" id="btn-start-rec" onclick="startRecording()">
+      🎥 Почати запис
+    </button>
+    <button class="btn btn-danger" id="btn-stop-rec" onclick="stopRecording()" style="display:none">
+      ⏹ Зупинити запис
+    </button>
+    <button class="btn btn-success" id="btn-send-video" onclick="sendVideo()" style="display:none">
+      ✅ Надіслати відео оцінювачу
+    </button>
+  </div>
+</div>
+
+<!-- ══════════ ПАНЕЛЬ 3 — ДОПОМОГА ══════════ -->
+<div id="panel-help" class="panel">
+  <div class="card">
+    <h2>❓ Як передати матеріали</h2>
+  </div>
+  <div class="steps">
+    <div class="step">
+      <span class="step-icon">📍</span>
+      <div class="step-text">
+        <strong>Геолокація</strong>
+        Прийдіть до об'єкта оцінки. Натисніть «Визначити місцезнаходження» — ваші GPS-координати автоматично надійдуть оцінювачу.
+      </div>
+    </div>
+    <div class="step">
+      <span class="step-icon">🎥</span>
+      <div class="step-text">
+        <strong>Відео-огляд</strong>
+        Запишіть відео тривалістю 30–120 сек. Покажіть фасад, вхід, всі кімнати, характерні деталі. Надішліть через кнопку.
+      </div>
+    </div>
+    <div class="step">
+      <span class="step-icon">📄</span>
+      <div class="step-text">
+        <strong>Документи</strong>
+        Поверніться в бот і надішліть скани/фото документів через меню «📄 Документи».
+      </div>
+    </div>
+    <div class="step">
+      <span class="step-icon">🪪</span>
+      <div class="step-text">
+        <strong>Ідентифікація</strong>
+        Надішліть фото паспорта і селфі з ним через меню «🪪 Ідентифікація».
+      </div>
+    </div>
+    <div class="step">
+      <span class="step-icon">📞</span>
+      <div class="step-text">
+        <strong>Питання?</strong>
+        Дзвоніть: 0 800 502-977 (безкоштовно)<br>
+        або +38 (050) 3000-173
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Telegram Web App init ──────────────────────────────
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+// Адаптуємо кольори до теми Telegram
+if (tg.colorScheme === 'dark') {
+  document.documentElement.style.setProperty('--bg',   '#1a1a2e');
+  document.documentElement.style.setProperty('--card',  '#242435');
+  document.documentElement.style.setProperty('--text',  '#e2e8f0');
+}
+
+// ── TAB SWITCHING ──────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    const names = ['geo','video','help'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+}
+
+// ══════════════════════════════════════════════════════
+//  ГЕОЛОКАЦІЯ
+// ══════════════════════════════════════════════════════
+let geoData = null;
+
+function setGeoStatus(msg, type) {
+  const el = document.getElementById('geo-status');
+  el.className = 'status ' + type;
+  el.innerHTML = msg;
+  el.style.display = 'flex';
+}
+
+function getLocation() {
+  const btn = document.getElementById('btn-locate');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ Визначення…';
+  setGeoStatus('<span>📡</span> Отримую координати…', 'info');
+
+  if (!navigator.geolocation) {
+    setGeoStatus('<span>❌</span> Геолокація не підтримується браузером', 'error');
+    btn.disabled = false;
+    btn.innerHTML = '📍 Визначити моє місцезнаходження';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const { latitude: lat, longitude: lon, accuracy: acc } = pos.coords;
+      geoData = { lat, lon, accuracy: Math.round(acc) };
+
+      document.getElementById('coords-value').textContent =
+        lat.toFixed(6) + ', ' + lon.toFixed(6);
+      document.getElementById('accuracy-value').textContent =
+        '±' + Math.round(acc) + ' метрів';
+      document.getElementById('coords-box').style.display = 'block';
+
+      // Google Maps preview
+      const mapSrc = `https://maps.google.com/maps?q=${lat},${lon}&z=17&output=embed`;
+      document.getElementById('map-iframe').src = mapSrc;
+      document.getElementById('map-preview').style.display = 'block';
+
+      setGeoStatus('<span>✅</span> Координати отримано! Натисніть «Надіслати»', 'success');
+      document.getElementById('btn-send-geo').disabled = false;
+      btn.disabled = false;
+      btn.innerHTML = '🔄 Оновити координати';
+    },
+    err => {
+      const msgs = {
+        1: 'Доступ до геолокації заборонено. Дозвольте в налаштуваннях браузера.',
+        2: 'Не вдалося визначити місцезнаходження. Перевірте GPS.',
+        3: 'Час очікування вийшов. Спробуйте ще раз.',
+      };
+      setGeoStatus('<span>❌</span> ' + (msgs[err.code] || 'Помилка'), 'error');
+      btn.disabled = false;
+      btn.innerHTML = '📍 Спробувати ще раз';
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+function sendLocation() {
+  if (!geoData) return;
+  const btn = document.getElementById('btn-send-geo');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ Надсилаю…';
+
+  tg.sendData(JSON.stringify({ event: 'location', ...geoData }));
+  setGeoStatus('<span>🎉</span> Геолокацію надіслано оцінювачу!', 'success');
+  btn.innerHTML = '✅ Надіслано!';
+  setTimeout(() => tg.close(), 1800);
+}
+
+// ══════════════════════════════════════════════════════
+//  ВІДЕО
+// ══════════════════════════════════════════════════════
+let mediaRecorder = null;
+let recordedChunks = [];
+let timerInterval  = null;
+let seconds        = 0;
+const MAX_SECONDS  = 120;
+
+function setVideoStatus(msg, type) {
+  const el = document.getElementById('video-status');
+  el.className = 'status ' + type;
+  el.innerHTML = msg;
+  el.style.display = 'flex';
+}
+
+function formatTime(s) {
+  const m = Math.floor(s / 60).toString().padStart(2,'0');
+  const sec = (s % 60).toString().padStart(2,'0');
+  return m + ':' + sec;
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: true,
+    });
+
+    const preview = document.getElementById('video-preview');
+    preview.srcObject = stream;
+    preview.style.display = 'block';
+    document.getElementById('recorded-preview').style.display = 'none';
+    document.getElementById('btn-send-video').style.display = 'none';
+
+    // Вибір підтримуваного формату
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+      ? 'video/webm;codecs=vp9'
+      : MediaRecorder.isTypeSupported('video/webm')
+      ? 'video/webm'
+      : 'video/mp4';
+
+    recordedChunks = [];
+    mediaRecorder  = new MediaRecorder(stream, { mimeType });
+
+    mediaRecorder.ondataavailable = e => {
+      if (e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      preview.style.display = 'none';
+
+      const blob = new Blob(recordedChunks, { type: mimeType });
+      const url  = URL.createObjectURL(blob);
+      const rec  = document.getElementById('recorded-preview');
+      rec.src    = url;
+      rec.style.display = 'block';
+
+      document.getElementById('btn-send-video').style.display = 'flex';
+      setVideoStatus('<span>✅</span> Відео готове! Перегляньте і надішліть.', 'success');
+    };
+
+    mediaRecorder.start(1000);
+    seconds = 0;
+
+    // Timer
+    const timerEl = document.getElementById('rec-timer');
+    timerEl.style.display = 'block';
+    timerInterval = setInterval(() => {
+      seconds++;
+      timerEl.textContent = '⏺ ' + formatTime(seconds);
+      if (seconds >= MAX_SECONDS) stopRecording();
+    }, 1000);
+
+    document.getElementById('btn-start-rec').style.display = 'none';
+    document.getElementById('btn-stop-rec').style.display  = 'flex';
+    setVideoStatus('<span>🔴</span> Запис іде… Покажіть об\'єкт оцінки', 'error');
+
+  } catch (err) {
+    const msg = err.name === 'NotAllowedError'
+      ? 'Доступ до камери заборонено. Дозвольте в налаштуваннях.'
+      : 'Помилка камери: ' + err.message;
+    setVideoStatus('<span>❌</span> ' + msg, 'error');
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  clearInterval(timerInterval);
+  document.getElementById('rec-timer').style.display  = 'none';
+  document.getElementById('btn-stop-rec').style.display  = 'none';
+  document.getElementById('btn-start-rec').style.display = 'flex';
+  document.getElementById('btn-start-rec').innerHTML = '🔄 Записати ще раз';
+}
+
+function sendVideo() {
+  const btn = document.getElementById('btn-send-video');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ Надсилаю…';
+
+  // Повідомляємо бот що відео готове
+  // Примітка: через Telegram Web App API не можна надіслати файл напряму,
+  // тому бот отримає сигнал і попросить клієнта надіслати відео повідомленням
+  tg.sendData(JSON.stringify({ event: 'video_note', duration: seconds }));
+
+  setVideoStatus(
+    '<span>📤</span> Сигнал надіслано! Тепер надішліть відео як відеоповідомлення в чат.',
+    'success'
+  );
+  btn.innerHTML = '✅ Надіслано!';
+
+  setTimeout(() => tg.close(), 2500);
+}
+</script>
+</body>
+</html>
