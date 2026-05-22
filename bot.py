@@ -449,17 +449,21 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отримує дані з Web App (відео-огляд і геолокація)."""
     msg = update.message
-    if not msg.web_app_data:
+    if not msg or not msg.web_app_data:
         return
+
+    logger.info(f"WebApp data отримано від {update.effective_user.id}: {msg.web_app_data.data[:100]}")
 
     try:
         data = json.loads(msg.web_app_data.data)
-    except Exception:
+    except Exception as e:
+        logger.error(f"WebApp JSON parse error: {e}")
         await msg.reply_text("⚠️ Помилка обробки даних Web App.")
         return
 
     tag = client_tag(update)
     event = data.get("event", "")
+    logger.info(f"WebApp event: {event}")
 
     # Геолокація з Web App
     if event == "location":
@@ -495,6 +499,7 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Відеодзвінок через WebApp
     elif event == "videocall_start":
+        logger.info(f"Відеодзвінок запит від {update.effective_user.id}")
         lat      = data.get("lat")
         lon      = data.get("lon")
         accuracy = data.get("accuracy")
@@ -1159,8 +1164,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Web App data handler (поза ConversationHandler — глобальний)
-    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+    # Web App data handler — група -1 (вищий пріоритет ніж ConversationHandler)
+    app.add_handler(
+        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data),
+        group=-1
+    )
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
