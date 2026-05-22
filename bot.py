@@ -495,22 +495,30 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Відеодзвінок через WebApp
     elif event == "videocall_start":
-        room     = data.get("room", "")
-        url      = data.get("url",  "")
         lat      = data.get("lat")
         lon      = data.get("lon")
         accuracy = data.get("accuracy")
 
+        # Генеруємо унікальну кімнату на стороні бота
+        import uuid
+        room_id  = uuid.uuid4().hex[:12].upper()
+        room     = f"Otsinka24-{room_id}"
+        jitsi_url = f"https://meet.jit.si/{room}"
+
         location_str = ""
         if lat and lon:
             maps_url = f"https://maps.google.com/?q={lat},{lon}"
-            location_str = f"\n📍 GPS: `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps_url})"
-            await _send_location_all(context, lat, lon)
+            location_str = (
+                f"\n📍 GPS: `{lat:.6f}, {lon:.6f}`\n"
+                f"🗺 [Google Maps]({maps_url})"
+            )
+            await _send_location_all(context, float(lat), float(lon))
 
-        u = msg.from_user
+        u   = msg.from_user
         phone = context.user_data.get("phone", "не вказано")
-        ts    = datetime.now().strftime("%d.%m.%Y %H:%M")
+        ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+        # Сповіщення адміну і в канал
         admin_msg = (
             f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n"
             f"{'─' * 28}\n"
@@ -520,17 +528,28 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"🕐 {ts}"
             f"{location_str}\n\n"
             f"🔗 *Кімната:* `{room}`\n"
-            f"[📹 Приєднатися до відеодзвінка]({url})\n\n"
+            f"[📹 Приєднатися до відеодзвінка]({jitsi_url})\n\n"
             f"⚡️ Клієнт чекає! Підключіться зараз.\n"
             f"[✉️ Написати клієнту](tg://user?id={u.id})"
         )
         await _send_text_all(context, admin_msg)
 
+        # Клієнту — кнопка з посиланням прямо в чат
         await msg.reply_text(
             f"✅ *Оцінювача сповіщено!*\n\n"
-            f"📹 Кімната: `{room}`\n\n"
-            f"Оцінювач приєднається найближчим часом.",
+            f"Натисніть кнопку нижче щоб увійти у відеокімнату.\n"
+            f"Оцінювач приєднається протягом кількох хвилин.",
             parse_mode="Markdown",
+        )
+        await context.bot.send_message(
+            msg.chat.id,
+            "📹 Ваша відеокімната:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📹 Увійти у відеодзвінок",
+                    url=jitsi_url
+                )
+            ]])
         )
 
 
