@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════╗
 ║         TELEGRAM BOT — ОЦІНКА24                      ║
@@ -365,9 +365,15 @@ async def _start_ident(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "персональних даних» № 2297-VI та GDPR._"
     )
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-        )
+        try:
+            await update.callback_query.edit_message_text(
+                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
+            )
+        except Exception:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
+            )
     else:
         await update.effective_message.reply_text(
             text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
@@ -830,3 +836,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
