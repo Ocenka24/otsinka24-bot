@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ОЦІНКА24 — Відеоогляд</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+:root {
+  --brand: #1a56a0;
+  --green: #22c55e;
+  --red: #ef4444;
+  --bg: #0f172a;
+  --card: #1e293b;
+  --card2: #273548;
+  --text: #f1f5f9;
+  --muted: #94a3b8;
+  --radius: 18px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── ЕКРАНИ ── */
+.screen { display:none; flex-direction:column; min-height:100vh; padding:20px; }
+.screen.active { display:flex; }
+
+/* ── ЛОГО ── */
+.logo-block {
+  display:flex; align-items:center; gap:12px;
+  background: linear-gradient(135deg, #1a56a0, #0e3a72);
+  border-radius: var(--radius); padding:16px 20px; margin-bottom:24px;
+  box-shadow: 0 8px 32px rgba(26,86,160,.4);
+}
+.logo-block img { width:44px; height:44px; border-radius:10px; background:#fff; padding:2px; object-fit:contain; }
+.logo-block h1 { font-size:20px; font-weight:800; letter-spacing:-.3px; }
+.logo-block p  { font-size:12px; color:rgba(255,255,255,.7); margin-top:2px; }
+
+/* ── КАРТКА ── */
+.card {
+  background: var(--card); border-radius: var(--radius);
+  padding: 24px; margin-bottom:16px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.3);
+}
+.card-icon { font-size:52px; text-align:center; margin-bottom:16px; }
+.card h2 { font-size:22px; font-weight:700; margin-bottom:8px; line-height:1.2; }
+.card p  { font-size:15px; color:var(--muted); line-height:1.6; }
+
+/* ── КНОПКИ ── */
+.btn {
+  width:100%; padding:18px;
+  border:none; border-radius:14px;
+  font-size:17px; font-weight:700;
+  cursor:pointer; display:flex; align-items:center;
+  justify-content:center; gap:10px;
+  margin-top:12px; transition:all .15s;
+  letter-spacing:-.2px;
+}
+.btn:active { transform:scale(.96); }
+.btn-brand  { background:var(--brand); color:#fff; box-shadow:0 4px 20px rgba(26,86,160,.5); }
+.btn-green  { background:var(--green); color:#fff; box-shadow:0 4px 20px rgba(34,197,94,.4); }
+.btn-outline { background:transparent; color:var(--muted); border:1.5px solid #334155; }
+.btn:disabled { opacity:.4; cursor:not-allowed; transform:none!important; }
+
+/* ── СТАТУС ── */
+.status {
+  padding:14px 16px; border-radius:12px;
+  font-size:14px; font-weight:600;
+  margin-top:12px; display:none;
+  align-items:center; gap:10px; line-height:1.4;
+}
+.status.show { display:flex; }
+.status.info    { background:rgba(26,86,160,.2); color:#93c5fd; border:1px solid rgba(26,86,160,.4); }
+.status.success { background:rgba(34,197,94,.15); color:#86efac; border:1px solid rgba(34,197,94,.3); }
+.status.error   { background:rgba(239,68,68,.15); color:#fca5a5; border:1px solid rgba(239,68,68,.3); }
+
+/* ── КАРТА ── */
+#map-wrap {
+  border-radius:12px; overflow:hidden;
+  height:160px; margin-top:12px; display:none;
+  border:1.5px solid #334155;
+}
+#map-iframe { width:100%; height:100%; border:none; }
+
+/* ── КООРДИНАТИ ── */
+.coords {
+  background:var(--card2); border-radius:12px;
+  padding:14px; margin-top:12px; display:none;
+}
+.coords-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:4px; }
+.coords-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+.coords-value { font-size:14px; font-weight:700; font-family:monospace; color:#93c5fd; }
+
+/* ── ПУЛЬС АНІМАЦІЯ ── */
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+.pulse { animation:pulse 1.5s infinite; }
+
+/* ── КІМНАТА ── */
+.room-card {
+  background: linear-gradient(135deg, #0f4c8a, #1a56a0);
+  border-radius: var(--radius); padding:20px; margin-top:12px;
+  text-align:center; box-shadow:0 8px 32px rgba(26,86,160,.4);
+}
+.room-card p { font-size:13px; color:rgba(255,255,255,.7); margin-bottom:8px; }
+.room-id { font-size:18px; font-weight:800; letter-spacing:.1em; color:#fff; font-family:monospace; }
+
+/* ── КРОК ІНДИКАТОР ── */
+.steps-bar {
+  display:flex; gap:6px; margin-bottom:20px;
+}
+.step-dot {
+  flex:1; height:4px; border-radius:4px;
+  background:#334155; transition:all .3s;
+}
+.step-dot.active { background:var(--brand); }
+.step-dot.done   { background:var(--green); }
+
+/* ── ТАЙМЕР ── */
+.timer {
+  font-size:42px; font-weight:800; text-align:center;
+  color:var(--green); font-family:monospace;
+  margin:8px 0; letter-spacing:.05em;
+}
+
+.divider { height:1px; background:#1e293b; margin:12px 0; }
+</style>
+</head>
+<body>
+
+<!-- ══════════ ЕКРАН 1 — ПРИВІТАННЯ ══════════ -->
+<div id="screen-welcome" class="screen active">
+  <div class="logo-block">
+    <img src="https://ocenka24.com.ua/img/ocenka24-logo.png" onerror="this.style.display='none'" alt="">
+    <div><h1>ОЦІНКА24</h1><p>Онлайн відеоогляд</p></div>
+  </div>
+
+  <div class="card">
+    <div class="card-icon">🏠</div>
+    <h2>Відеоогляд вашого об'єкта</h2>
+    <p>Оцінювач побачить ваш об'єкт онлайн і дасть вказівки що показати. Реєстрація не потрібна.</p>
+  </div>
+
+  <div class="card" style="padding:18px">
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px">
+      <span style="font-size:24px">📍</span>
+      <div>
+        <div style="font-weight:700;font-size:14px">Визначення місця</div>
+        <div style="color:var(--muted);font-size:12px">GPS-координати об'єкта</div>
+      </div>
+      <span style="margin-left:auto;color:var(--green);font-size:18px">→</span>
+    </div>
+    <div class="divider"></div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;margin-top:10px">
+      <span style="font-size:24px">🎥</span>
+      <div>
+        <div style="font-weight:700;font-size:14px">Відеодзвінок</div>
+        <div style="color:var(--muted);font-size:12px">Без реєстрації, 1 клік</div>
+      </div>
+      <span style="margin-left:auto;color:var(--green);font-size:18px">→</span>
+    </div>
+    <div class="divider"></div>
+    <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+      <span style="font-size:24px">✅</span>
+      <div>
+        <div style="font-weight:700;font-size:14px">Готово</div>
+        <div style="color:var(--muted);font-size:12px">Звіт оцінювача надійде в бот</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:auto">
+    <button class="btn btn-green" onclick="goToGPS()">
+      🚀 Розпочати відеоогляд
+    </button>
+    <button class="btn btn-outline" onclick="tg.close()">
+      Пізніше
+    </button>
+  </div>
+</div>
+
+<!-- ══════════ ЕКРАН 2 — GPS ══════════ -->
+<div id="screen-gps" class="screen">
+  <div class="logo-block">
+    <img src="https://ocenka24.com.ua/img/ocenka24-logo.png" onerror="this.style.display='none'" alt="">
+    <div><h1>Крок 1 з 2</h1><p>Визначення місця об'єкта</p></div>
+  </div>
+
+  <div class="steps-bar">
+    <div class="step-dot active" id="dot1"></div>
+    <div class="step-dot" id="dot2"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-icon">📍</div>
+    <h2>Де знаходиться об'єкт?</h2>
+    <p>Перебуваючи біля будинку або квартири натисніть кнопку нижче. GPS визначить координати автоматично.</p>
+  </div>
+
+  <div id="gps-status" class="status info show">
+    <span>📡</span><span>Готово до визначення координат</span>
+  </div>
+
+  <div class="coords" id="coords-box">
+    <div class="coords-row">
+      <span class="coords-label">Координати</span>
+      <span class="coords-value" id="coords-val">—</span>
+    </div>
+    <div class="coords-row">
+      <span class="coords-label">Точність</span>
+      <span class="coords-value" id="acc-val">—</span>
+    </div>
+  </div>
+
+  <div id="map-wrap"><iframe id="map-iframe" src=""></iframe></div>
+
+  <div style="margin-top:16px">
+    <button class="btn btn-brand" id="btn-gps" onclick="getGPS()">
+      📍 Визначити моє місцезнаходження
+    </button>
+    <button class="btn btn-green" id="btn-next-gps" onclick="goToCall()" disabled>
+      ✅ Далі — Відеодзвінок →
+    </button>
+    <button class="btn btn-outline" onclick="goToCall(true)">
+      Пропустити геолокацію
+    </button>
+  </div>
+</div>
+
+<!-- ══════════ ЕКРАН 3 — ДЗВІНОК ══════════ -->
+<div id="screen-call" class="screen">
+  <div class="logo-block">
+    <img src="https://ocenka24.com.ua/img/ocenka24-logo.png" onerror="this.style.display='none'" alt="">
+    <div><h1>Крок 2 з 2</h1><p>Відеодзвінок з оцінювачем</p></div>
+  </div>
+
+  <div class="steps-bar">
+    <div class="step-dot done"></div>
+    <div class="step-dot active"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-icon">⏳</div>
+    <h2 id="call-title">Кімната готується...</h2>
+    <p id="call-desc">Зачекайте, оцінювач отримує сповіщення і приєднається до дзвінка.</p>
+  </div>
+
+  <div id="call-status" class="status info show">
+    <span class="pulse">🔔</span><span>Сповіщаємо оцінювача...</span>
+  </div>
+
+  <div class="room-card" id="room-card" style="display:none">
+    <p>Ваша відеокімната</p>
+    <div class="room-id" id="room-id-display">—</div>
+  </div>
+
+  <div style="margin-top:16px" id="call-buttons">
+    <button class="btn btn-green" id="btn-join" onclick="joinCall()" disabled style="font-size:19px;padding:20px">
+      📹 Увійти у відеодзвінок
+    </button>
+    <p style="text-align:center;color:var(--muted);font-size:12px;margin-top:8px">
+      Відкриється у браузері телефону. Дозвольте доступ до камери.
+    </p>
+  </div>
+
+  <div style="margin-top:auto;padding-top:16px">
+    <button class="btn btn-outline" onclick="tg.close()">
+      Завершити і повернутись в бот
+    </button>
+  </div>
+</div>
+
+<script>
+const tg = window.Telegram.WebApp;
+tg.ready();
+tg.expand();
+
+// ── Стан ──────────────────────────────────────────────────
+let geoData   = null;
+let jitsiUrl  = null;
+let roomName  = null;
+
+// ── Навігація між екранами ────────────────────────────────
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + id).classList.add('active');
+  window.scrollTo(0, 0);
+}
+
+function goToGPS() { showScreen('gps'); }
+
+function goToCall(skipGps = false) {
+  if (!skipGps && !geoData) {
+    setGpsStatus('⚠️ Спочатку визначте геолокацію або натисніть «Пропустити»', 'error');
+    return;
+  }
+  showScreen('call');
+  initCall();
+}
+
+// ── GPS ───────────────────────────────────────────────────
+function setGpsStatus(msg, type) {
+  const el = document.getElementById('gps-status');
+  el.className = 'status show ' + type;
+  el.innerHTML = `<span>${msg.split(' ')[0]}</span><span>${msg.split(' ').slice(1).join(' ')}</span>`;
+}
+
+function getGPS() {
+  const btn = document.getElementById('btn-gps');
+  btn.disabled = true;
+  btn.innerHTML = '⏳ Визначення...';
+  setGpsStatus('📡 Отримую GPS координати...', 'info');
+
+  if (!navigator.geolocation) {
+    setGpsStatus('❌ GPS не підтримується вашим телефоном', 'error');
+    btn.disabled = false;
+    btn.innerHTML = '📍 Визначити моє місцезнаходження';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const { latitude: lat, longitude: lon, accuracy: acc } = pos.coords;
+      geoData = { lat, lon, accuracy: Math.round(acc) };
+
+      document.getElementById('coords-val').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+      document.getElementById('acc-val').textContent = `±${Math.round(acc)} м`;
+      document.getElementById('coords-box').style.display = 'block';
+
+      document.getElementById('map-iframe').src =
+        `https://maps.google.com/maps?q=${lat},${lon}&z=17&output=embed`;
+      document.getElementById('map-wrap').style.display = 'block';
+
+      setGpsStatus('✅ Координати отримано! Натисніть «Далі»', 'success');
+      document.getElementById('btn-next-gps').disabled = false;
+      btn.disabled = false;
+      btn.innerHTML = '🔄 Оновити координати';
+    },
+    err => {
+      const msgs = {
+        1: '❌ Доступ до GPS заборонено. Дозвольте в налаштуваннях телефону.',
+        2: '❌ Не вдалося визначити місце. Перевірте GPS.',
+        3: '❌ Час вийшов. Спробуйте ще раз.',
+      };
+      setGpsStatus(msgs[err.code] || '❌ Помилка GPS', 'error');
+      btn.disabled = false;
+      btn.innerHTML = '📍 Спробувати ще раз';
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+  );
+}
+
+// ── Відеодзвінок ──────────────────────────────────────────
+function generateRoom() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let id = '';
+  for (let i = 0; i < 12; i++) id += chars[Math.floor(Math.random() * chars.length)];
+  return `Otsinka24-${id}`;
+}
+
+function initCall() {
+  roomName = generateRoom();
+  jitsiUrl = `https://meet.jit.si/${roomName}`;
+
+  // Надсилаємо дані боту
+  const payload = {
+    event:    'videocall_start',
+    room:     roomName,
+    url:      jitsiUrl,
+    lat:      geoData ? geoData.lat       : null,
+    lon:      geoData ? geoData.lon       : null,
+    accuracy: geoData ? geoData.accuracy  : null,
+  };
+
+  tg.sendData(JSON.stringify(payload));
+
+  // Оновлюємо UI
+  document.getElementById('room-id-display').textContent = roomName;
+  document.getElementById('room-card').style.display = 'block';
+
+  // Через 3 сек — дозволяємо зайти
+  setTimeout(() => {
+    document.getElementById('call-title').textContent = 'Кімната готова!';
+    document.getElementById('call-desc').textContent  =
+      'Натисніть велику кнопку нижче. Дозвольте доступ до камери і мікрофона.';
+    document.getElementById('call-status').className = 'status show success';
+    document.getElementById('call-status').innerHTML =
+      '<span>✅</span><span>Оцінювач сповіщений і чекає на вас</span>';
+    document.getElementById('btn-join').disabled = false;
+  }, 3000);
+}
+
+function joinCall() {
+  if (jitsiUrl) {
+    // Відкрити у браузері телефону
+    window.open(jitsiUrl, '_blank');
+  }
+}
+</script>
+</body>
+</html>

@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import json
+import uuid
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -85,10 +86,9 @@ HOTLINE     = "0 800 502-977"
 MOBILE      = "+38 (050) 3000-173"
 LOGO_URL    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
-# ─── Web App URL (GitHub Pages після деплою) ─────────────
-# Після того як завантажите webapp/index.html на GitHub Pages,
-# замініть це посилання на ваше: https://USERNAME.github.io/otsinka24-bot/
-WEBAPP_URL  = os.getenv("WEBAPP_URL", "")
+# ─── Web App URLs ────────────────────────────────────────
+WEBAPP_URL       = os.getenv("WEBAPP_URL", "")
+VIDEOCALL_URL    = os.getenv("VIDEOCALL_URL", "")  # URL для відеодзвінка
 
 # ─── Стани розмови ────────────────────────────────────────
 (
@@ -100,7 +100,8 @@ WEBAPP_URL  = os.getenv("WEBAPP_URL", "")
     DOC_UPLOAD,
     LOC_RECEIVE,
     VIDEO_TIME,
-) = range(8)
+    VIDEO_CALL_LOC,
+) = range(9)
 
 # ─── Типи документів ──────────────────────────────────────
 DOCUMENT_TYPES = {
@@ -135,9 +136,19 @@ def kb_main_menu() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📍 Геолокація",     callback_data="menu_location"),
-            InlineKeyboardButton("🎥 Відеоогляд",     callback_data="menu_video"),
+            InlineKeyboardButton("🎥 Слот відеоогляду", callback_data="menu_video"),
         ],
     ]
+    if VIDEOCALL_URL:
+        rows.append([InlineKeyboardButton(
+            "📹 Онлайн-огляд (відео)",
+            web_app=WebAppInfo(url=VIDEOCALL_URL)
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            "📹 Онлайн-огляд (відео)",
+            callback_data="menu_videocall"
+        )])
     # Web App кнопка — показуємо тільки якщо URL налаштовано
     if WEBAPP_URL:
         rows.append([
@@ -393,6 +404,10 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "back_main":
         return await show_main_menu(update, context, edit=True)
 
+    if data == "menu_videocall":
+        context.user_data["flow"] = "videocall"
+        return await _start_videocall(update, context)
+
     if data == "menu_about":
         await query.edit_message_text(
             "🏢 *ОЦІНКА24*\n\n"
@@ -477,6 +492,46 @@ async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=kb_back_menu(),
         )
         await _send_text_all(context, f"🎥 *ВІДЕО-ОГЛЯД (Web App)*\n\n{tag}")
+
+    # Відеодзвінок через WebApp
+    elif event == "videocall_start":
+        room     = data.get("room", "")
+        url      = data.get("url",  "")
+        lat      = data.get("lat")
+        lon      = data.get("lon")
+        accuracy = data.get("accuracy")
+
+        location_str = ""
+        if lat and lon:
+            maps_url = f"https://maps.google.com/?q={lat},{lon}"
+            location_str = f"\n📍 GPS: `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps_url})"
+            await _send_location_all(context, lat, lon)
+
+        u = msg.from_user
+        phone = context.user_data.get("phone", "не вказано")
+        ts    = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+        admin_msg = (
+            f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n"
+            f"{'─' * 28}\n"
+            f"👤 *{u.full_name}*\n"
+            f"📞 {phone}\n"
+            f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
+            f"🕐 {ts}"
+            f"{location_str}\n\n"
+            f"🔗 *Кімната:* `{room}`\n"
+            f"[📹 Приєднатися до відеодзвінка]({url})\n\n"
+            f"⚡️ Клієнт чекає! Підключіться зараз.\n"
+            f"[✉️ Написати клієнту](tg://user?id={u.id})"
+        )
+        await _send_text_all(context, admin_msg)
+
+        await msg.reply_text(
+            f"✅ *Оцінювача сповіщено!*\n\n"
+            f"📹 Кімната: `{room}`\n\n"
+            f"Оцінювач приєднається найближчим часом.",
+            parse_mode="Markdown",
+        )
 
 
 # ══════════════════════════════════════════════════════════
@@ -914,6 +969,159 @@ async def handle_video_time(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 #  ДОПОМІЖНІ ОБРОБНИКИ
 # ══════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════
+#  БЛОК 5: ВІДЕОДЗВІНОК (Jitsi Meet)
+# ══════════════════════════════════════════════════════════
+
+def generate_jitsi_room() -> str:
+    """Генерує унікальну назву кімнати Jitsi."""
+    uid = uuid.uuid4().hex[:12].upper()
+    return f"Otsinka24-{uid}"
+
+
+async def _start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Крок 1 — запит геолокації перед дзвінком."""
+    text = (
+        "📹 *Відеодзвінок з оцінювачем*\n\n"
+        "*Крок 1 з 2* — Поділіться геолокацією обʼєкта\n\n"
+        "📍 Перебуваючи біля обʼєкта натисніть кнопку нижче,\n"
+        "або введіть адресу текстом.\n\n"
+        "_GPS-координати привʼяжуться до відеосесії._"
+    )
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
+            )
+        except Exception:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
+            )
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "👇 Натисніть кнопку або введіть адресу:",
+            reply_markup=kb_location(),
+        )
+    else:
+        await update.effective_message.reply_text(text, parse_mode="Markdown")
+        await update.effective_message.reply_text(
+            "👇 Натисніть або введіть адресу:",
+            reply_markup=kb_location(),
+        )
+    return VIDEO_CALL_LOC
+
+
+async def handle_videocall_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Крок 2 — отримали локацію, генеруємо кімнату Jitsi."""
+    msg = update.message
+
+    # Локація або текстова адреса
+    if msg.location:
+        lat, lon = msg.location.latitude, msg.location.longitude
+        maps_url = f"https://maps.google.com/?q={lat},{lon}"
+        location_str = (
+            f"📍 GPS: `{lat:.6f}, {lon:.6f}`\n"
+            f"🗺 [Google Maps]({maps_url})"
+        )
+        await _send_location_all(context, lat, lon)
+    elif msg.text and not msg.text.startswith("/"):
+        location_str = f"📬 Адреса: {msg.text.strip()}"
+    else:
+        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
+        return VIDEO_CALL_LOC
+
+    # Генеруємо унікальну кімнату Jitsi
+    room = generate_jitsi_room()
+    jitsi_url = f"https://meet.jit.si/{room}"
+    context.user_data["jitsi_room"] = room
+    context.user_data["jitsi_url"]  = jitsi_url
+
+    u = update.effective_user
+    phone = context.user_data.get("phone", "не вказано")
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Повідомлення адміну/каналу
+    admin_msg = (
+        f"📹 *ВІДЕОДЗВІНОК — ЗАПИТ*\n\n"
+        f"👤 *{u.full_name}*\n"
+        f"📞 {phone}\n"
+        f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
+        f"🕐 {ts}\n\n"
+        f"{location_str}\n\n"
+        f"🔗 *Посилання на кімнату:*\n"
+        f"[Приєднатися до відеодзвінка]({jitsi_url})\n\n"
+        f"⚡️ Клієнт чекає! Підключіться якнайшвидше.\n\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})"
+    )
+    await _send_text_all(context, admin_msg)
+
+    # Повідомлення клієнту
+    await msg.reply_text(
+        f"✅ *Геолокацію зафіксовано!*\n\n"
+        f"📹 *Крок 2 з 2* — Відеодзвінок\n\n"
+        f"Натисніть кнопку нижче щоб підключитися.\n"
+        f"Оцінювач приєднається протягом кількох хвилин.\n\n"
+        f"⏳ *Очікуйте дзвінка...*",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode="Markdown",
+    )
+
+    # Кнопка для входу у кімнату
+    await msg.reply_text(
+        f"🔗 Ваша відеокімната готова:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "📹 Увійти у відеокімнату",
+                url=jitsi_url
+            )
+        ]])
+    )
+
+    return MAIN_MENU
+
+
+async def handle_videocall_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Пропуск геолокації — одразу генеруємо кімнату."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "back_main":
+        return await show_main_menu(update, context, edit=True)
+
+    # Генеруємо кімнату без геолокації
+    room = generate_jitsi_room()
+    jitsi_url = f"https://meet.jit.si/{room}"
+    u = update.effective_user
+    phone = context.user_data.get("phone", "не вказано")
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    admin_msg = (
+        f"📹 *ВІДЕОДЗВІНОК — ЗАПИТ*\n\n"
+        f"👤 *{u.full_name}*\n"
+        f"📞 {phone}\n"
+        f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
+        f"🕐 {ts}\n"
+        f"📍 Геолокацію не надано\n\n"
+        f"🔗 [Приєднатися до відеодзвінка]({jitsi_url})\n\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})"
+    )
+    await _send_text_all(context, admin_msg)
+
+    await query.edit_message_text(
+        f"📹 *Відеокімната готова!*\n\nОцінювач незабаром приєднається.",
+        parse_mode="Markdown",
+    )
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "🔗 Натисніть щоб увійти:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📹 Увійти у відеокімнату", url=jitsi_url)
+        ]])
+    )
+    return MAIN_MENU
+
+
 async def handle_back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -961,6 +1169,13 @@ def build_app() -> Application:
                 CallbackQueryHandler(handle_loc_skip, pattern="^(step_skip|back_main)$"),
             ],
             VIDEO_TIME: [CallbackQueryHandler(handle_video_time)],
+            VIDEO_CALL_LOC: [
+                MessageHandler(
+                    (filters.LOCATION | filters.TEXT) & ~filters.COMMAND,
+                    handle_videocall_location,
+                ),
+                CallbackQueryHandler(handle_videocall_skip, pattern="^(step_skip|back_main)$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
