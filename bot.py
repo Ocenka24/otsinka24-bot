@@ -139,16 +139,10 @@ def kb_main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🎥 Слот відеоогляду", callback_data="menu_video"),
         ],
     ]
-    if VIDEOCALL_URL:
-        rows.append([InlineKeyboardButton(
-            "📹 Онлайн-огляд (відео)",
-            web_app=WebAppInfo(url=VIDEOCALL_URL)
-        )])
-    else:
-        rows.append([InlineKeyboardButton(
-            "📹 Онлайн-огляд (відео)",
-            callback_data="menu_videocall"
-        )])
+    rows.append([InlineKeyboardButton(
+        "📹 Онлайн-огляд (відео)",
+        callback_data="menu_videocall"
+    )])
     # Web App кнопка — показуємо тільки якщо URL налаштовано
     if WEBAPP_URL:
         rows.append([
@@ -406,7 +400,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "menu_videocall":
         context.user_data["flow"] = "videocall"
-        return await _start_videocall(update, context)
+        return await _start_videocall_keyboard(update, context)
 
     if data == "menu_about":
         await query.edit_message_text(
@@ -1001,6 +995,40 @@ def generate_jitsi_room() -> str:
     """Генерує унікальну назву кімнати Jitsi."""
     uid = uuid.uuid4().hex[:12].upper()
     return f"Otsinka24-{uid}"
+
+
+async def _start_videocall_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Показує кнопку клавіатури для відкриття WebApp (tg.sendData вимагає keyboard button)."""
+    query = update.callback_query
+
+    if VIDEOCALL_URL:
+        # Показуємо ReplyKeyboard з WebApp кнопкою — ТІЛЬКИ так працює tg.sendData()
+        webapp_kb = ReplyKeyboardMarkup(
+            [[KeyboardButton(
+                "📹 Відкрити відеоогляд",
+                web_app=WebAppInfo(url=VIDEOCALL_URL)
+            )]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        try:
+            await query.edit_message_text(
+                "📹 *Онлайн відеоогляд*\n\n"
+                "Натисніть кнопку нижче щоб розпочати.\n\n"
+                "_Дозвольте доступ до GPS коли запитає._",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        await context.bot.send_message(
+            update.effective_chat.id,
+            "👇 Натисніть кнопку:",
+            reply_markup=webapp_kb,
+        )
+        return MAIN_MENU
+    else:
+        # Якщо WebApp URL не налаштовано — стара flow через бота
+        return await _start_videocall(update, context)
 
 
 async def _start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
