@@ -998,37 +998,70 @@ def generate_jitsi_room() -> str:
 
 
 async def _start_videocall_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показує кнопку клавіатури для відкриття WebApp (tg.sendData вимагає keyboard button)."""
+    """Простий flow відеодзвінка — генеруємо кімнату і просимо GPS."""
+    import uuid
     query = update.callback_query
+    u = update.effective_user
 
-    if VIDEOCALL_URL:
-        # Показуємо ReplyKeyboard з WebApp кнопкою — ТІЛЬКИ так працює tg.sendData()
-        webapp_kb = ReplyKeyboardMarkup(
-            [[KeyboardButton(
-                "📹 Відкрити відеоогляд",
-                web_app=WebAppInfo(url=VIDEOCALL_URL)
-            )]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
+    # Одразу генеруємо кімнату
+    room_id   = uuid.uuid4().hex[:12].upper()
+    room      = f"Otsinka24-{room_id}"
+    jitsi_url = f"https://meet.jit.si/{room}"
+    context.user_data["jitsi_room"] = room
+    context.user_data["jitsi_url"]  = jitsi_url
+
+    phone = context.user_data.get("phone", "не вказано")
+    ts    = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Надсилаємо сповіщення адміну одразу
+    admin_msg = (
+        f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n"
+        f"{'─' * 28}\n"
+        f"👤 *{u.full_name}*\n"
+        f"📞 {phone}\n"
+        f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
+        f"🕐 {ts}\n\n"
+        f"📍 GPS — клієнт надсилає зараз...\n\n"
+        f"🔗 *Кімната:* `{room}`\n"
+        f"[📹 Приєднатися до відеодзвінка]({jitsi_url})\n\n"
+        f"⚡️ Клієнт підключається!\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})"
+    )
+    await _send_text_all(context, admin_msg)
+
+    # Клієнту — кнопка Jitsi одразу
+    try:
+        await query.edit_message_text(
+            "📹 *Відеоогляд розпочато!*\n\nОцінювач вже отримав сповіщення.",
+            parse_mode="Markdown",
         )
-        try:
-            await query.edit_message_text(
-                "📹 *Онлайн відеоогляд*\n\n"
-                "Натисніть кнопку нижче щоб розпочати.\n\n"
-                "_Дозвольте доступ до GPS коли запитає._",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "👇 Натисніть кнопку:",
-            reply_markup=webapp_kb,
-        )
-        return MAIN_MENU
-    else:
-        # Якщо WebApp URL не налаштовано — стара flow через бота
-        return await _start_videocall(update, context)
+    except Exception:
+        pass
+
+    # Просимо GPS через звичайну кнопку Telegram
+    gps_kb = ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Надіслати геолокацію об'єкта", request_location=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+    )
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "📍 *Поділіться геолокацією об'єкта*\n\n"
+        "Перебуваючи біля об'єкта натисніть кнопку нижче.\n"
+        "_GPS прив'яжеться до вашого відеоогляду._",
+        parse_mode="Markdown",
+        reply_markup=gps_kb,
+    )
+
+    # Надсилаємо кнопку входу у кімнату
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "👇 Натисніть щоб увійти у відеодзвінок:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi_url)
+        ]])
+    )
+    return VIDEO_CALL_LOC
 
 
 async def _start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1065,70 +1098,53 @@ async def _start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def handle_videocall_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Крок 2 — отримали локацію, генеруємо кімнату Jitsi."""
+    """Отримали GPS від клієнта — оновлюємо оцінювача."""
     msg = update.message
 
-    # Локація або текстова адреса
     if msg.location:
         lat, lon = msg.location.latitude, msg.location.longitude
         maps_url = f"https://maps.google.com/?q={lat},{lon}"
-        location_str = (
-            f"📍 GPS: `{lat:.6f}, {lon:.6f}`\n"
+        u = update.effective_user
+        phone = context.user_data.get("phone", "не вказано")
+        room  = context.user_data.get("jitsi_room", "—")
+
+        # Оновлення адміну з GPS
+        gps_update = (
+            f"📍 *GPS ОБ'ЄКТА ОТРИМАНО*\n"
+            f"{'─' * 28}\n"
+            f"👤 {u.full_name} | 📞 {phone}\n"
+            f"Кімната: `{room}`\n\n"
+            f"📍 `{lat:.6f}, {lon:.6f}`\n"
             f"🗺 [Google Maps]({maps_url})"
         )
+        await _send_text_all(context, gps_update)
         await _send_location_all(context, lat, lon)
+
+        await msg.reply_text(
+            "✅ *GPS зафіксовано!*\n\nОцінювач отримав координати.",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
     elif msg.text and not msg.text.startswith("/"):
-        location_str = f"📬 Адреса: {msg.text.strip()}"
+        # Текстова адреса
+        address = msg.text.strip()
+        u = update.effective_user
+        phone = context.user_data.get("phone", "не вказано")
+        room  = context.user_data.get("jitsi_room", "—")
+        await _send_text_all(
+            context,
+            f"📍 *АДРЕСА ОБ'ЄКТА*\n"
+            f"👤 {u.full_name} | Кімната: `{room}`\n"
+            f"📬 {address}"
+        )
+        await msg.reply_text(
+            f"✅ *Адресу зафіксовано!*\n📬 {address}",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
     else:
-        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
+        await msg.reply_text("⚠️ Поділіться геолокацією кнопкою нижче.")
         return VIDEO_CALL_LOC
-
-    # Генеруємо унікальну кімнату Jitsi
-    room = generate_jitsi_room()
-    jitsi_url = f"https://meet.jit.si/{room}"
-    context.user_data["jitsi_room"] = room
-    context.user_data["jitsi_url"]  = jitsi_url
-
-    u = update.effective_user
-    phone = context.user_data.get("phone", "не вказано")
-    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    # Повідомлення адміну/каналу
-    admin_msg = (
-        f"📹 *ВІДЕОДЗВІНОК — ЗАПИТ*\n\n"
-        f"👤 *{u.full_name}*\n"
-        f"📞 {phone}\n"
-        f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
-        f"🕐 {ts}\n\n"
-        f"{location_str}\n\n"
-        f"🔗 *Посилання на кімнату:*\n"
-        f"[Приєднатися до відеодзвінка]({jitsi_url})\n\n"
-        f"⚡️ Клієнт чекає! Підключіться якнайшвидше.\n\n"
-        f"[✉️ Написати клієнту](tg://user?id={u.id})"
-    )
-    await _send_text_all(context, admin_msg)
-
-    # Повідомлення клієнту
-    await msg.reply_text(
-        f"✅ *Геолокацію зафіксовано!*\n\n"
-        f"📹 *Крок 2 з 2* — Відеодзвінок\n\n"
-        f"Натисніть кнопку нижче щоб підключитися.\n"
-        f"Оцінювач приєднається протягом кількох хвилин.\n\n"
-        f"⏳ *Очікуйте дзвінка...*",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode="Markdown",
-    )
-
-    # Кнопка для входу у кімнату
-    await msg.reply_text(
-        f"🔗 Ваша відеокімната готова:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "📹 Увійти у відеокімнату",
-                url=jitsi_url
-            )
-        ]])
-    )
 
     return MAIN_MENU
 
