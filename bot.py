@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════╗
-║         TELEGRAM BOT — ОЦІНКА24                      ║
-║         Версія: 2.0                                  ║
-║         Мова: Python 3.10+                           ║
-║         Бібліотека: python-telegram-bot v20+         ║
-╚══════════════════════════════════════════════════════╝
-
-Функції v2.0:
-  • Логотип + контакти при /start
-  • Ідентифікація клієнта (паспорт + селфі)
-  • Надсилання документів (7 типів)
-  • Геолокація об'єкта оцінки
-  • Запис на відеоогляд (слоти)
-  • Web App — відео з камери + GPS прямо в боті
-  • Закритий канал + дублювання адмінам
-  • Повна процедура (всі кроки послідовно)
+ОЦІНКА24 — Telegram Bot v3.0
 """
-
 import logging
 import os
 import sys
@@ -28,338 +12,284 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+import warnings
+warnings.filterwarnings("ignore", message=".*CallbackQueryHandler.*per_message.*", category=UserWarning)
+
 from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-    WebAppInfo,
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
 )
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+    Application, CallbackQueryHandler, CommandHandler,
+    ConversationHandler, ContextTypes, MessageHandler, filters,
 )
 
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    message=".*CallbackQueryHandler.*per_message.*",
-    category=UserWarning,
-)
-
-# ─── Logging ──────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── Конфігурація — токен і адміни ────────────────────────
+# ── Конфігурація ──────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
-    logger.critical("❌ BOT_TOKEN не знайдено! Заповніть файл .env")
+    logger.critical("❌ BOT_TOKEN не знайдено!")
     sys.exit(1)
 
 _admin_raw = os.getenv("ADMIN_IDS", "")
 if not _admin_raw:
-    logger.critical("❌ ADMIN_IDS не знайдено! Заповніть файл .env")
+    logger.critical("❌ ADMIN_IDS не знайдено!")
     sys.exit(1)
-ADMIN_IDS = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]
-
-# ─── ID закритого каналу для документів ──────────────────
-# Формат: -1001234567890  (з мінусом!)
-# Як отримати: дивіться інструкцію нижче у README
-# Поки канал не створено — залиште 0, бот буде надсилати тільки адмінам
+ADMIN_IDS  = [int(x.strip()) for x in _admin_raw.split(",") if x.strip().isdigit()]
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
-# ─── Контактні дані ОЦІНКА24 ─────────────────────────────
-WEBSITE     = "https://ocenka24.com.ua/"
-INFO_EMAIL  = "info@ocenka24.com.ua"
-HOTLINE     = "0 800 502-977"
-MOBILE      = "+38 (050) 3000-173"
-LOGO_URL    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
+WEBSITE    = "https://ocenka24.com.ua/"
+INFO_EMAIL = "info@ocenka24.com.ua"
+HOTLINE    = "0 800 502-977"
+MOBILE     = "+38 (050) 3000-173"
+LOGO_URL   = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
-# ─── Web App URLs ────────────────────────────────────────
-WEBAPP_URL       = os.getenv("WEBAPP_URL", "")
-VIDEOCALL_URL    = os.getenv("VIDEOCALL_URL", "")  # URL для відеодзвінка
-
-# ─── Стани розмови ────────────────────────────────────────
-(
-    MAIN_MENU,
-    IDENT_PASSPORT,
-    IDENT_SELFIE,
-    IDENT_PHONE,
-    DOC_CHOOSE,
-    DOC_UPLOAD,
-    LOC_RECEIVE,
-    VIDEO_TIME,
-    VIDEO_CALL_LOC,
-) = range(9)
-
-# ─── Типи документів ──────────────────────────────────────
-DOCUMENT_TYPES = {
-    "doc_title":     "📜 Правовстановлюючий документ",
-    "doc_techpass":  "🗂 Технічний паспорт",
-    "doc_extract":   "📋 Витяг з Держреєстру",
-    "doc_plan":      "📐 План/схема об'єкта",
-    "doc_cadastral": "🗺 Кадастровий план (для землі)",
-    "doc_id":        "🪪 Документ, що посвідчує особу",
-    "doc_other":     "📎 Інший документ",
+# ── Типи об'єктів оцінки ──────────────────────────────────
+OBJECT_TYPES = {
+    "obj_car": {
+        "icon": "🚗",
+        "name": "Транспортний засіб",
+        "docs": [
+            "📋 Технічний паспорт (свідоцтво про реєстрацію)",
+            "🪪 Документ що посвідчує особу",
+            "📸 Фото ТЗ ззовні з 4 кутів",
+            "📸 Фото салону, пробігу та VIN-коду",
+        ],
+    },
+    "obj_flat": {
+        "icon": "🏠",
+        "name": "Квартира",
+        "docs": [
+            "📜 Правовстановлюючий документ",
+            "📋 Технічний паспорт",
+            "🪪 Документ що посвідчує особу",
+            "📸 Фото кімнат, кухні, служб",
+        ],
+    },
+    "obj_house": {
+        "icon": "🏡",
+        "name": "Житловий будинок",
+        "docs": [
+            "📜 Правовстановлюючий документ на будинок",
+            "📋 Технічний паспорт",
+            "📜 Правовстановлюючий документ на землю",
+            "🪪 Документ що посвідчує особу",
+            "📸 Фото будинку ззовні з 4 кутів та всередині",
+        ],
+    },
+    "obj_land": {
+        "icon": "🌿",
+        "name": "Земельна ділянка",
+        "docs": [
+            "📜 Правовстановлюючий документ на землю",
+            "🪪 Документ що посвідчує особу",
+            "📸 Фото ділянки (4-6 штук)",
+        ],
+    },
+    "obj_nonresidential": {
+        "icon": "🏭",
+        "name": "Нежитлові будівлі та споруди",
+        "docs": [
+            "📜 Правовстановлюючий документ",
+            "📋 Технічний паспорт",
+            "🪪 Документ що посвідчує особу / юридичну особу",
+            "📸 Фото будівлі ззовні з 4 кутів та всередині",
+        ],
+    },
 }
 
-# ─── Часові слоти відеоогляду ─────────────────────────────
-VIDEO_SLOTS = [
-    "09:00", "10:00", "11:00",
-    "12:00", "13:00", "14:00",
-    "15:00", "16:00", "17:00",
-    "18:00",
-]
+# ── Стани ─────────────────────────────────────────────────
+(
+    MAIN_MENU,
+    DOC_OBJECT_TYPE,
+    DOC_UPLOAD,
+    LOC_RECEIVE,
+    VIDEO_LOC,
+) = range(5)
 
 
 # ══════════════════════════════════════════════════════════
 #  КЛАВІАТУРИ
 # ══════════════════════════════════════════════════════════
 
-def kb_main_menu() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("🚀 ПОВНА ПРОЦЕДУРА (всі кроки)", callback_data="full_procedure")],
+def kb_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Документи для оцінки",   callback_data="menu_docs")],
+        [InlineKeyboardButton("📹 Онлайн відеоогляд",      callback_data="menu_video")],
+        [InlineKeyboardButton("📍 Геолокація об'єкта",     callback_data="menu_location")],
         [
-            InlineKeyboardButton("🪪 Ідентифікація", callback_data="menu_ident"),
-            InlineKeyboardButton("📄 Документи",      callback_data="menu_docs"),
+            InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about"),
+            InlineKeyboardButton("📞 Контакти",     callback_data="menu_contact"),
         ],
-        [
-            InlineKeyboardButton("📍 Геолокація",     callback_data="menu_location"),
-            InlineKeyboardButton("🎥 Слот відеоогляду", callback_data="menu_video"),
-        ],
-    ]
-    rows.append([InlineKeyboardButton(
-        "📹 Онлайн-огляд (відео)",
-        callback_data="menu_videocall"
-    )])
-    # Web App кнопка — показуємо тільки якщо URL налаштовано
-    if WEBAPP_URL:
-        rows.append([
-            InlineKeyboardButton(
-                "📱 Відео + GPS (Web App)",
-                web_app=WebAppInfo(url=WEBAPP_URL),
-            )
-        ])
-    rows.append([
-        InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about"),
-        InlineKeyboardButton("📞 Контакти",     callback_data="menu_contact"),
     ])
-    return InlineKeyboardMarkup(rows)
 
 
-def kb_doc_types(uploaded: list) -> InlineKeyboardMarkup:
+def kb_object_types() -> InlineKeyboardMarkup:
     rows = []
-    for key, label in DOCUMENT_TYPES.items():
-        mark = "✅ " if key in uploaded else ""
-        rows.append([InlineKeyboardButton(f"{mark}{label}", callback_data=key)])
-    rows.append([
-        InlineKeyboardButton("✔️ Завершити надсилання", callback_data="doc_done"),
-        InlineKeyboardButton("🏠 Меню",                 callback_data="back_main"),
-    ])
-    return InlineKeyboardMarkup(rows)
-
-
-def kb_location() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Поділитися геолокацією", request_location=True)]],
-        one_time_keyboard=True,
-        resize_keyboard=True,
-    )
-
-
-def kb_video_slots() -> InlineKeyboardMarkup:
-    rows = []
-    row = []
-    for slot in VIDEO_SLOTS:
-        row.append(InlineKeyboardButton(slot, callback_data=f"slot_{slot}"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    for key, obj in OBJECT_TYPES.items():
+        rows.append([InlineKeyboardButton(
+            f"{obj['icon']} {obj['name']}",
+            callback_data=key
+        )])
     rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="back_main")])
     return InlineKeyboardMarkup(rows)
 
 
-def kb_back_menu() -> InlineKeyboardMarkup:
+def kb_doc_upload(obj_key: str, uploaded: int, total: int) -> InlineKeyboardMarkup:
+    obj = OBJECT_TYPES[obj_key]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"✅ Завершити ({uploaded}/{total} надіслано)",
+            callback_data="doc_done"
+        )],
+        [InlineKeyboardButton("🔄 Інший тип об'єкта", callback_data="menu_docs")],
+        [InlineKeyboardButton("🏠 Головне меню",       callback_data="back_main")],
+    ])
+
+
+def kb_back_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🏠 Головне меню", callback_data="back_main")
     ]])
 
 
-def kb_skip_or_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⏭ Пропустити", callback_data="step_skip"),
-        InlineKeyboardButton("🏠 Меню",       callback_data="back_main"),
-    ]])
+def kb_gps() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Поділитися геолокацією", request_location=True)]],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
+
+
+def kb_gps_videocall() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("📍 Надіслати геолокацію об'єкта", request_location=True)]],
+        one_time_keyboard=True, resize_keyboard=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════
-#  ДОПОМІЖНІ ФУНКЦІЇ — клієнт, канал, адміни
+#  ДОПОМІЖНІ ФУНКЦІЇ
 # ══════════════════════════════════════════════════════════
 
 def client_tag(update: Update, phone: str = "") -> str:
     u = update.effective_user
     ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-    # Пряме посилання для відкриття чату з клієнтом
-    chat_link = f"[✉️ Написати клієнту](tg://user?id={u.id})"
-    username_line = f"@{u.username}" if u.username else "username не вказано"
-    phone_line = f"\n📞 Телефон: `{phone}`" if phone else ""
+    phone_line = f"\n📞 `{phone}`" if phone else ""
+    link = f"[✉️ Написати клієнту](tg://user?id={u.id})"
     return (
-        f"👤 *{u.full_name}*  |  ID: `{u.id}`\n"
-        f"📱 {username_line}{phone_line}\n"
-        f"🕐 {ts}\n"
-        f"{chat_link}"
+        f"👤 *{u.full_name}*  |  🆔 `{u.id}`\n"
+        f"📱 @{u.username or '—'}{phone_line}\n"
+        f"🕐 {ts}\n{link}"
     )
 
 
-async def _send_text_all(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
-    """Надсилає текст і в канал, і всім адмінам."""
-    # → Канал
+async def send_all(context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     if CHANNEL_ID:
         try:
             await context.bot.send_message(CHANNEL_ID, text, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Канал: помилка надсилання тексту: {e}")
-    # → Адміни
+            logger.warning(f"Канал: {e}")
     for aid in ADMIN_IDS:
         try:
             await context.bot.send_message(aid, text, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Адмін {aid}: помилка тексту: {e}")
+            logger.warning(f"Адмін {aid}: {e}")
 
 
-async def _send_photo_all(context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str) -> None:
-    """Надсилає фото і в канал, і всім адмінам."""
+async def send_photo_all(context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str) -> None:
     if CHANNEL_ID:
         try:
             await context.bot.send_photo(CHANNEL_ID, file_id, caption=caption, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Канал: помилка фото: {e}")
+            logger.warning(f"Канал фото: {e}")
     for aid in ADMIN_IDS:
         try:
             await context.bot.send_photo(aid, file_id, caption=caption, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Адмін {aid}: помилка фото: {e}")
+            logger.warning(f"Адмін {aid} фото: {e}")
 
 
-async def _send_document_all(context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str) -> None:
-    """Надсилає документ і в канал, і всім адмінам."""
+async def send_doc_all(context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str) -> None:
     if CHANNEL_ID:
         try:
             await context.bot.send_document(CHANNEL_ID, file_id, caption=caption, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Канал: помилка документа: {e}")
+            logger.warning(f"Канал документ: {e}")
     for aid in ADMIN_IDS:
         try:
             await context.bot.send_document(aid, file_id, caption=caption, parse_mode="Markdown")
         except Exception as e:
-            logger.warning(f"Адмін {aid}: помилка документа: {e}")
+            logger.warning(f"Адмін {aid} документ: {e}")
 
 
-async def _send_location_all(context: ContextTypes.DEFAULT_TYPE, lat: float, lon: float) -> None:
-    """Надсилає геолокацію і в канал, і всім адмінам."""
+async def send_location_all(context: ContextTypes.DEFAULT_TYPE, lat: float, lon: float) -> None:
     if CHANNEL_ID:
         try:
             await context.bot.send_location(CHANNEL_ID, lat, lon)
         except Exception as e:
-            logger.warning(f"Канал: помилка локації: {e}")
+            logger.warning(f"Канал локація: {e}")
     for aid in ADMIN_IDS:
         try:
             await context.bot.send_location(aid, lat, lon)
         except Exception as e:
-            logger.warning(f"Адмін {aid}: помилка локації: {e}")
+            logger.warning(f"Адмін {aid} локація: {e}")
 
 
-async def _send_video_all(context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str) -> None:
-    """Надсилає відео і в канал, і всім адмінам."""
-    if CHANNEL_ID:
-        try:
-            await context.bot.send_video(CHANNEL_ID, file_id, caption=caption, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Канал: помилка відео: {e}")
-    for aid in ADMIN_IDS:
-        try:
-            await context.bot.send_video(aid, file_id, caption=caption, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"Адмін {aid}: помилка відео: {e}")
-
-
-async def show_main_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    edit: bool = False,
-) -> int:
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False) -> int:
     text = (
-        "🏢 *ОЦІНКА24* — Ваш надійний партнер у оцінці майна\n\n"
-        "Оберіть потрібну дію або запустіть *Повну процедуру*:"
+        "🏢 *ОЦІНКА24* — професійна оцінка майна\n\n"
+        "Оберіть потрібну дію:"
     )
     if edit and update.callback_query:
         try:
-            # Спробуємо редагувати текстове повідомлення
             await update.callback_query.edit_message_text(
-                text, reply_markup=kb_main_menu(), parse_mode="Markdown"
+                text, reply_markup=kb_main(), parse_mode="Markdown"
             )
         except Exception:
-            # Якщо повідомлення містить фото — надсилаємо нове
             await context.bot.send_message(
-                update.effective_chat.id,
-                text, reply_markup=kb_main_menu(), parse_mode="Markdown",
+                update.effective_chat.id, text,
+                reply_markup=kb_main(), parse_mode="Markdown"
             )
     else:
         await update.effective_message.reply_text(
-            text, reply_markup=kb_main_menu(), parse_mode="Markdown"
+            text, reply_markup=kb_main(), parse_mode="Markdown"
         )
     return MAIN_MENU
 
 
 # ══════════════════════════════════════════════════════════
-#  /start — логотип + контакти
+#  /start
 # ══════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     u = update.effective_user
-
     caption = (
         f"👋 Вітаємо, *{u.first_name}*!\n\n"
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
         "Через цього бота ви можете:\n"
-        "• 🪪 Пройти ідентифікацію\n"
-        "• 📄 Надіслати необхідні документи\n"
-        "• 📍 Вказати місцезнаходження об'єкта\n"
-        "• 🎥 Записатись на відеоогляд\n\n"
-        f"🌐 {WEBSITE}\n"
+        "• 📄 Надіслати документи для оцінки\n"
+        "• 📹 Провести онлайн відеоогляд\n"
+        "• 📍 Вказати місцезнаходження об'єкта\n\n"
+        f"☎️ {HOTLINE}  |  📱 {MOBILE}\n"
         f"📧 {INFO_EMAIL}\n"
-        f"☎️ Гаряча лінія: {HOTLINE}\n"
-        f"📱 Моб.: {MOBILE}\n\n"
+        f"🌐 {WEBSITE}\n\n"
         "👇 Оберіть дію:"
     )
-
     try:
         await update.message.reply_photo(
-            photo=LOGO_URL,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=kb_main_menu(),
+            photo=LOGO_URL, caption=caption,
+            parse_mode="Markdown", reply_markup=kb_main(),
         )
-    except Exception as e:
-        logger.warning(f"Логотип не завантажився ({e}), fallback без фото")
+    except Exception:
         await update.message.reply_text(
-            caption,
-            parse_mode="Markdown",
-            reply_markup=kb_main_menu(),
+            caption, parse_mode="Markdown", reply_markup=kb_main()
         )
     return MAIN_MENU
 
@@ -379,28 +309,17 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     data = query.data
 
-    if data == "full_procedure":
-        context.user_data["flow"] = "full"
-        context.user_data["full_steps_done"] = []
-        return await _start_ident(update, context)
-    if data == "menu_ident":
-        context.user_data["flow"] = "single"
-        return await _start_ident(update, context)
-    if data == "menu_docs":
-        context.user_data["flow"] = "single"
-        return await _start_docs(update, context)
-    if data == "menu_location":
-        context.user_data["flow"] = "single"
-        return await _start_location(update, context)
-    if data == "menu_video":
-        context.user_data["flow"] = "single"
-        return await _start_video(update, context)
     if data == "back_main":
         return await show_main_menu(update, context, edit=True)
 
-    if data == "menu_videocall":
-        context.user_data["flow"] = "videocall"
-        return await _start_videocall_keyboard(update, context)
+    if data == "menu_docs":
+        return await start_docs(update, context)
+
+    if data == "menu_video":
+        return await start_videocall(update, context)
+
+    if data == "menu_location":
+        return await start_location(update, context)
 
     if data == "menu_about":
         await query.edit_message_text(
@@ -410,9 +329,12 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "✅ Оцінка нерухомості, авто, бізнесу, збитків\n"
             "✅ Звіти для банків, нотаріусів, судів\n"
             "✅ Відповідність МСО та НСО України\n\n"
-            f"📧 {INFO_EMAIL}\n"
+            f"📧 `{INFO_EMAIL}`\n"
             f"🌐 {WEBSITE}",
-            reply_markup=kb_back_menu(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 Контакти", callback_data="menu_contact")],
+                [InlineKeyboardButton("🏠 Головне меню", callback_data="back_main")],
+            ]),
             parse_mode="Markdown",
         )
         return MAIN_MENU
@@ -428,417 +350,196 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Пн–Пт: 09:00–18:00\n"
             "Сб: 09:00–14:00 (за записом)\n"
             "Нд: вихідний",
-            reply_markup=kb_back_menu(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about")],
+                [InlineKeyboardButton("🏠 Головне меню", callback_data="back_main")],
+            ]),
             parse_mode="Markdown",
         )
         return MAIN_MENU
 
-    return MAIN_MENU
-
-
-# ══════════════════════════════════════════════════════════
-#  WEB APP — обробник даних від index.html
-# ══════════════════════════════════════════════════════════
-
-async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отримує дані з Web App (відео-огляд і геолокація)."""
-    msg = update.message
-    if not msg or not msg.web_app_data:
-        return
-
-    logger.info(f"WebApp data отримано від {update.effective_user.id}: {msg.web_app_data.data[:100]}")
-
-    try:
-        data = json.loads(msg.web_app_data.data)
-    except Exception as e:
-        logger.error(f"WebApp JSON parse error: {e}")
-        await msg.reply_text("⚠️ Помилка обробки даних Web App.")
-        return
-
-    tag = client_tag(update)
-    event = data.get("event", "")
-    logger.info(f"WebApp event: {event}")
-
-    # Геолокація з Web App
-    if event == "location":
-        lat = data.get("lat")
-        lon = data.get("lon")
-        acc = data.get("accuracy", "—")
-        if lat and lon:
-            maps_url = f"https://maps.google.com/?q={lat},{lon}"
-            await _send_text_all(
-                context,
-                f"📍 *ГЕОЛОКАЦІЯ (Web App)*\n\n{tag}\n\n"
-                f"🗺 [Google Maps]({maps_url})\n"
-                f"Координати: `{lat:.6f}, {lon:.6f}`\n"
-                f"Точність: {acc} м",
-            )
-            await _send_location_all(context, lat, lon)
-            await msg.reply_text(
-                f"✅ *Геолокацію надіслано!*\n\n"
-                f"📌 `{lat:.5f}, {lon:.5f}`\n"
-                f"🗺 [Google Maps]({maps_url})",
-                parse_mode="Markdown",
-                reply_markup=kb_back_menu(),
-            )
-
-    # Відео з Web App
-    elif event == "video_note":
-        await msg.reply_text(
-            "✅ *Відео отримано!* Оцінювач перегляне його найближчим часом.",
-            parse_mode="Markdown",
-            reply_markup=kb_back_menu(),
-        )
-        await _send_text_all(context, f"🎥 *ВІДЕО-ОГЛЯД (Web App)*\n\n{tag}")
-
-    # Відеодзвінок через WebApp
-    elif event == "videocall_start":
-        logger.info(f"Відеодзвінок запит від {update.effective_user.id}")
-        lat      = data.get("lat")
-        lon      = data.get("lon")
-        accuracy = data.get("accuracy")
-
-        # Генеруємо унікальну кімнату на стороні бота
-        import uuid
-        room_id  = uuid.uuid4().hex[:12].upper()
-        room     = f"Otsinka24-{room_id}"
-        jitsi_url = f"https://meet.jit.si/{room}"
-
-        location_str = ""
-        if lat and lon:
-            maps_url = f"https://maps.google.com/?q={lat},{lon}"
-            location_str = (
-                f"\n📍 GPS: `{lat:.6f}, {lon:.6f}`\n"
-                f"🗺 [Google Maps]({maps_url})"
-            )
-            await _send_location_all(context, float(lat), float(lon))
-
-        u   = msg.from_user
-        phone = context.user_data.get("phone", "не вказано")
-        ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-        # Сповіщення адміну і в канал
-        admin_msg = (
-            f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n"
-            f"{'─' * 28}\n"
-            f"👤 *{u.full_name}*\n"
-            f"📞 {phone}\n"
-            f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
-            f"🕐 {ts}"
-            f"{location_str}\n\n"
-            f"🔗 *Кімната:* `{room}`\n"
-            f"[📹 Приєднатися до відеодзвінка]({jitsi_url})\n\n"
-            f"⚡️ Клієнт чекає! Підключіться зараз.\n"
-            f"[✉️ Написати клієнту](tg://user?id={u.id})"
-        )
-        await _send_text_all(context, admin_msg)
-
-        # Клієнту — кнопка з посиланням прямо в чат
-        await msg.reply_text(
-            f"✅ *Оцінювача сповіщено!*\n\n"
-            f"Натисніть кнопку нижче щоб увійти у відеокімнату.\n"
-            f"Оцінювач приєднається протягом кількох хвилин.",
-            parse_mode="Markdown",
-        )
-        await context.bot.send_message(
-            msg.chat.id,
-            "📹 Ваша відеокімната:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "📹 Увійти у відеодзвінок",
-                    url=jitsi_url
-                )
-            ]])
-        )
-
-
-# ══════════════════════════════════════════════════════════
-#  БЛОК 1: ІДЕНТИФІКАЦІЯ
-# ══════════════════════════════════════════════════════════
-
-async def _start_ident(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (
-        "🪪 *Ідентифікація клієнта* — Крок 1/2\n\n"
-        "Надішліть *фото паспорта*:\n"
-        "• Паспорт-книжечка → сторінки 1 та 2\n"
-        "• ID-картка → обидві сторони\n\n"
-        "⚠️ _Дані обробляються згідно з ЗУ «Про захист "
-        "персональних даних» № 2297-VI та GDPR._"
-    )
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-            )
-        except Exception:
-            await context.bot.send_message(
-                update.effective_chat.id,
-                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-            )
-    else:
-        await update.effective_message.reply_text(
-            text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-        )
-    return IDENT_PASSPORT
-
-
-async def handle_passport(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = update.message
-    if not (msg.photo or msg.document):
-        await msg.reply_text("⚠️ Надішліть *фото* або файл паспорта.", parse_mode="Markdown")
-        return IDENT_PASSPORT
-
-    file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
-    context.user_data["passport_fid"]  = file_id
-    context.user_data["passport_type"] = "photo" if msg.photo else "document"
-
-    # Запит номера телефону
-    from telegram import KeyboardButton, ReplyKeyboardMarkup
-    phone_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📞 Поділитися номером телефону", request_contact=True)]],
-        one_time_keyboard=True,
-        resize_keyboard=True,
-    )
-    await msg.reply_text(
-        "✅ Паспорт отримано!\n\n"
-        "📞 *Крок 2/3 — Номер телефону*\n\n"
-        "Натисніть кнопку нижче щоб поділитися номером,\n"
-        "або введіть вручну у форматі: +380XXXXXXXXX",
-        parse_mode="Markdown",
-        reply_markup=phone_kb,
-    )
-    return IDENT_PHONE
-
-
-async def handle_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = update.message
-
-    if msg.contact:
-        phone = msg.contact.phone_number
-    elif msg.text and (msg.text.startswith("+") or msg.text.startswith("0")):
-        phone = msg.text.strip()
-    else:
-        await msg.reply_text(
-            "⚠️ Введіть номер телефону у форматі *+380XXXXXXXXX* "
-            "або натисніть кнопку нижче.",
-            parse_mode="Markdown",
-        )
-        return IDENT_PHONE
-
-    context.user_data["phone"] = phone
-    await msg.reply_text(
-        f"✅ Телефон `{phone}` збережено!\n\n"
-        "🤳 *Крок 3/3 — Селфі з паспортом*\n\n"
-        "Надішліть фото вашого *обличчя поряд з паспортом у руці*.",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    return IDENT_SELFIE
-
-
-async def handle_selfie(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = update.message
-    if not msg.photo:
-        await msg.reply_text("⚠️ Надішліть *фото* (селфі з паспортом).", parse_mode="Markdown")
-        return IDENT_SELFIE
-
-    context.user_data["selfie_fid"] = msg.photo[-1].file_id
-    phone = context.user_data.get("phone", "")
-    tag = client_tag(update, phone=phone)
-
-    await _send_text_all(context, f"🪪 *НОВА ІДЕНТИФІКАЦІЯ*\n\n{tag}")
-    await _send_photo_all(context, context.user_data["passport_fid"], f"📄 *Паспорт*\n{tag}")
-    await _send_photo_all(context, context.user_data["selfie_fid"],   f"🤳 *Селфі*\n{tag}")
-
-    context.user_data.setdefault("full_steps_done", []).append("ident")
-
-    if context.user_data.get("flow") == "full":
-        await msg.reply_text(
-            "✅ *Ідентифікацію завершено!*\n\nПереходимо до документів… 📄",
-            parse_mode="Markdown",
-        )
-        return await _start_docs(update, context)
-
-    await msg.reply_text(
-        "✅ *Ідентифікацію успішно завершено!*\n\nВаші дані передані оцінювачу. Дякуємо!",
-        reply_markup=kb_back_menu(),
-        parse_mode="Markdown",
-    )
-    return MAIN_MENU
-
-
-async def handle_ident_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    if query.data == "step_skip" and context.user_data.get("flow") == "full":
-        await query.edit_message_text("⏭ Ідентифікацію пропущено.")
-        return await _start_docs(update, context)
-    if query.data == "back_main":
-        return await show_main_menu(update, context, edit=True)
-    return IDENT_PASSPORT
-
-
-# ══════════════════════════════════════════════════════════
-#  БЛОК 2: ДОКУМЕНТИ
-# ══════════════════════════════════════════════════════════
-
-async def _start_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.setdefault("uploaded_doc_types", [])
-    text = (
-        "📄 *Надсилання документів*\n\n"
-        "Оберіть *тип документа*, який хочете надіслати.\n"
-        "Можна надіслати кілька документів різних типів."
-    )
-    kbd = kb_doc_types(context.user_data["uploaded_doc_types"])
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=kbd, parse_mode="Markdown")
-        except Exception:
-            await context.bot.send_message(
-                update.effective_chat.id, text, reply_markup=kbd, parse_mode="Markdown"
-            )
-    else:
-        await update.effective_message.reply_text(text, reply_markup=kbd, parse_mode="Markdown")
-    return DOC_CHOOSE
-
-
-async def handle_doc_choose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "back_main":
-        return await show_main_menu(update, context, edit=True)
+    # Вибір типу об'єкта
+    if data in OBJECT_TYPES:
+        return await select_object_type(update, context, data)
 
     if data == "doc_done":
-        uploaded = context.user_data.get("uploaded_doc_types", [])
-        if not uploaded:
-            await query.edit_message_text(
-                "⚠️ Ви ще не надіслали жодного документа.\nОберіть тип і надішліть файл.",
-                reply_markup=kb_doc_types([]),
-            )
-            return DOC_CHOOSE
+        return await finish_docs(update, context)
 
-        u = update.effective_user
-        phone = context.user_data.get("phone", "не вказано")
-        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-        chat_link = f"[✉️ Написати клієнту](tg://user?id={u.id})"
-        unique_types = list(dict.fromkeys(uploaded))  # зберігаємо порядок
+    return MAIN_MENU
 
-        # Зведена картка клієнта з усіма документами
-        doc_list = "\n".join(
-            f"  {i+1}. {DOCUMENT_TYPES.get(k, k)}"
-            for i, k in enumerate(unique_types)
+
+# ══════════════════════════════════════════════════════════
+#  БЛОК 1: ДОКУМЕНТИ
+# ══════════════════════════════════════════════════════════
+
+async def start_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.setdefault("uploaded", [])
+    text = (
+        "📄 *Документи для оцінки*\n\n"
+        "Оберіть *тип об'єкта* — бот покаже перелік необхідних документів:"
+    )
+    try:
+        await update.callback_query.edit_message_text(
+            text, reply_markup=kb_object_types(), parse_mode="Markdown"
         )
-        summary = (
-            f"📋 *ЗВЕДЕНА КАРТКА КЛІЄНТА*\n"
-            f"{'─' * 30}\n"
-            f"👤 *{u.full_name}*\n"
-            f"🆔 ID: `{u.id}`\n"
-            f"📱 @{u.username or '—'}\n"
-            f"📞 Телефон: `{phone}`\n"
-            f"🕐 {ts}\n"
-            f"{'─' * 30}\n"
-            f"📄 *Надіслані документи ({len(uploaded)} шт.):*\n"
-            f"{doc_list}\n"
-            f"{'─' * 30}\n"
-            f"{chat_link}"
+    except Exception:
+        await context.bot.send_message(
+            update.effective_chat.id, text,
+            reply_markup=kb_object_types(), parse_mode="Markdown"
         )
-        await _send_text_all(context, summary)
-        context.user_data.setdefault("full_steps_done", []).append("docs")
+    return DOC_OBJECT_TYPE
 
-        if context.user_data.get("flow") == "full":
-            await query.edit_message_text(
-                f"✅ *Документи надіслано!* ({len(uploaded)} шт.)\n\nПереходимо до геолокації… 📍",
-                parse_mode="Markdown",
-            )
-            return await _start_location(update, context)
 
-        await query.edit_message_text(
-            f"✅ *Документи успішно надіслано!* ({len(uploaded)} шт.)\n\n"
-            "Оцінювач перевірить їх найближчим часом.",
-            reply_markup=kb_back_menu(),
-            parse_mode="Markdown",
+async def select_object_type(update: Update, context: ContextTypes.DEFAULT_TYPE, obj_key: str) -> int:
+    obj = OBJECT_TYPES[obj_key]
+    context.user_data["obj_key"]  = obj_key
+    context.user_data["uploaded"] = []
+
+    docs_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(obj["docs"]))
+
+    text = (
+        f"{obj['icon']} *{obj['name']}*\n\n"
+        f"📋 *Необхідні документи:*\n{docs_list}\n\n"
+        "Надсилайте документи по одному (фото або PDF).\n"
+        "Коли надішлете всі — натисніть «✅ Завершити»."
+    )
+    try:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=kb_doc_upload(obj_key, 0, len(obj["docs"])),
+            parse_mode="Markdown"
         )
-        return MAIN_MENU
-
-    if data in DOCUMENT_TYPES:
-        context.user_data["current_doc_key"] = data
-        label = DOCUMENT_TYPES[data]
-        await query.edit_message_text(
-            f"📎 *{label}*\n\nНадішліть файл або фото документа.\n"
-            "_Підтримуються: фото, PDF, JPEG, PNG_",
-            parse_mode="Markdown",
+    except Exception:
+        await context.bot.send_message(
+            update.effective_chat.id, text,
+            reply_markup=kb_doc_upload(obj_key, 0, len(obj["docs"])),
+            parse_mode="Markdown"
         )
-        return DOC_UPLOAD
-
-    return DOC_CHOOSE
+    return DOC_UPLOAD
 
 
 async def handle_doc_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     msg = update.message
-    doc_key = context.user_data.get("current_doc_key", "doc_other")
-    label   = DOCUMENT_TYPES.get(doc_key, "Документ")
+    obj_key = context.user_data.get("obj_key", "")
+    obj     = OBJECT_TYPES.get(obj_key, {})
+    uploaded = context.user_data.setdefault("uploaded", [])
 
     if msg.photo:
         file_id, is_photo = msg.photo[-1].file_id, True
     elif msg.document:
         file_id, is_photo = msg.document.file_id, False
     else:
-        await msg.reply_text("⚠️ Надішліть файл або фото документа.")
+        await msg.reply_text("⚠️ Надішліть фото або PDF документа.")
         return DOC_UPLOAD
 
-    uploaded = context.user_data.setdefault("uploaded_doc_types", [])
-    uploaded.append(doc_key)
+    uploaded.append(file_id)
+    u     = msg.from_user
+    total = len(obj.get("docs", []))
+    count = len(uploaded)
 
-    u = update.effective_user
-    phone = context.user_data.get("phone", "")
-    phone_str = f" | 📞 {phone}" if phone else ""
     caption = (
-        f"*{label}*\n"
-        f"👤 {u.full_name}{phone_str}\n"
-        f"🆔 `{u.id}` | @{u.username or '—'}"
+        f"📄 Документ #{count}\n"
+        f"{obj.get('icon','')} {obj.get('name','')}\n"
+        f"👤 {u.full_name} | 🆔 `{u.id}`\n"
+        f"📱 @{u.username or '—'}"
     )
-    if is_photo:
-        await _send_photo_all(context, file_id, caption)
-    else:
-        await _send_document_all(context, file_id, caption)
 
+    if is_photo:
+        await send_photo_all(context, file_id, caption)
+    else:
+        await send_doc_all(context, file_id, caption)
+
+    progress = "✅" * count + "⬜" * max(0, total - count)
     await msg.reply_text(
-        f"✅ *{label}* отримано! (Надіслано: {len(uploaded)} шт.)\n\n"
-        "Оберіть ще тип або завершіть надсилання:",
-        reply_markup=kb_doc_types(uploaded),
+        f"✅ Документ #{count} отримано!\n\n"
+        f"Прогрес: {progress} ({count}/{total})\n\n"
+        f"{'Надсилайте наступний документ або натисніть «Завершити».' if count < total else '🎉 Всі документи надіслано! Натисніть «Завершити».'}",
+        reply_markup=kb_doc_upload(obj_key, count, total),
+    )
+    return DOC_UPLOAD
+
+
+async def finish_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    obj_key  = context.user_data.get("obj_key", "")
+    obj      = OBJECT_TYPES.get(obj_key, {})
+    uploaded = context.user_data.get("uploaded", [])
+    u = update.effective_user
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    if not uploaded:
+        await query.edit_message_text(
+            "⚠️ Ви ще не надіслали жодного документа.\nНадішліть хоча б один файл.",
+            reply_markup=kb_doc_upload(obj_key, 0, len(obj.get("docs", []))),
+        )
+        return DOC_UPLOAD
+
+    docs_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(obj.get("docs", [])))
+    summary = (
+        f"📋 *ДОКУМЕНТИ ОТРИМАНО*\n"
+        f"{'─' * 28}\n"
+        f"👤 *{u.full_name}*\n"
+        f"🆔 `{u.id}` | @{u.username or '—'}\n"
+        f"🕐 {ts}\n\n"
+        f"{obj.get('icon','')} *{obj.get('name','')}*\n"
+        f"Надіслано: *{len(uploaded)}* файлів\n\n"
+        f"📋 Перелік документів:\n{docs_list}\n\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})"
+    )
+    await send_all(context, summary)
+
+    await query.edit_message_text(
+        f"✅ *Документи успішно надіслано!*\n\n"
+        f"📦 Файлів: *{len(uploaded)}*\n"
+        f"{obj.get('icon','')} Тип: *{obj.get('name','')}*\n\n"
+        "Оцінювач перевірить їх найближчим часом і зв'яжеться з вами.",
+        reply_markup=kb_main(),
         parse_mode="Markdown",
     )
-    return DOC_CHOOSE
+    return MAIN_MENU
+
+
+async def handle_doc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "back_main":
+        return await show_main_menu(update, context, edit=True)
+    if data == "menu_docs":
+        return await start_docs(update, context)
+    if data == "doc_done":
+        return await finish_docs(update, context)
+    if data in OBJECT_TYPES:
+        return await select_object_type(update, context, data)
+    return DOC_UPLOAD
 
 
 # ══════════════════════════════════════════════════════════
-#  БЛОК 3: ГЕОЛОКАЦІЯ
+#  БЛОК 2: ГЕОЛОКАЦІЯ
 # ══════════════════════════════════════════════════════════
 
-async def _start_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def start_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = (
         "📍 *Геолокація об'єкта оцінки*\n\n"
-        "Натисніть кнопку нижче, перебуваючи біля об'єкта, "
+        "Перебуваючи біля об'єкта натисніть кнопку нижче,\n"
         "або введіть *адресу текстом*.\n\n"
-        "📌 _Координати будуть автоматично зафіксовані у справі._"
+        "_Координати будуть зафіксовані у справі._"
     )
-    if update.callback_query:
+    try:
         await update.callback_query.edit_message_text(
-            text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
+            text, reply_markup=kb_back_main(), parse_mode="Markdown"
         )
+    except Exception:
         await context.bot.send_message(
-            update.effective_chat.id,
-            "👇 Натисніть кнопку або введіть адресу:",
-            reply_markup=kb_location(),
+            update.effective_chat.id, text,
+            reply_markup=kb_back_main(), parse_mode="Markdown"
         )
-    else:
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
-        await update.effective_message.reply_text(
-            "👇 Натисніть кнопку або введіть адресу:",
-            reply_markup=kb_location(),
-        )
+    await context.bot.send_message(
+        update.effective_chat.id,
+        "👇 Натисніть кнопку або введіть адресу:",
+        reply_markup=kb_gps(),
+    )
     return LOC_RECEIVE
 
 
@@ -847,291 +548,151 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if msg.location:
         lat, lon = msg.location.latitude, msg.location.longitude
-        context.user_data["location"] = {"lat": lat, "lon": lon}
         maps_url = f"https://maps.google.com/?q={lat},{lon}"
-
         tag = client_tag(update)
-        await _send_text_all(
+        await send_all(
             context,
             f"📍 *ГЕОЛОКАЦІЯ ОБ'ЄКТА*\n\n{tag}\n\n"
-            f"🗺 [Google Maps]({maps_url})\n"
-            f"Координати: `{lat:.6f}, {lon:.6f}`",
+            f"📌 `{lat:.6f}, {lon:.6f}`\n"
+            f"🗺 [Google Maps]({maps_url})"
         )
-        await _send_location_all(context, lat, lon)
-
-        success = (
+        await send_location_all(context, lat, lon)
+        await msg.reply_text(
             f"✅ *Геолокацію зафіксовано!*\n\n"
-            f"📌 Координати: `{lat:.5f}, {lon:.5f}`\n"
-            f"🗺 [Переглянути на Google Maps]({maps_url})"
+            f"📌 `{lat:.5f}, {lon:.5f}`\n"
+            f"🗺 [Google Maps]({maps_url})",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
         )
 
     elif msg.text and not msg.text.startswith("/"):
         address = msg.text.strip()
-        context.user_data["location"] = {"address": address}
         tag = client_tag(update)
-        await _send_text_all(context, f"📍 *АДРЕСА ОБ'ЄКТА*\n\n{tag}\n\n📬 {address}")
-        success = f"✅ *Адресу зафіксовано!*\n\n📬 {address}"
-
+        await send_all(context, f"📍 *АДРЕСА ОБ'ЄКТА*\n\n{tag}\n\n📬 {address}")
+        await msg.reply_text(
+            f"✅ *Адресу зафіксовано!*\n\n📬 {address}",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove(),
+        )
     else:
-        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу текстом.")
+        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
         return LOC_RECEIVE
 
-    context.user_data.setdefault("full_steps_done", []).append("location")
-
-    if context.user_data.get("flow") == "full":
-        await msg.reply_text(
-            success + "\n\nПереходимо до відеоогляду! 🎥",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode="Markdown",
-        )
-        return await _start_video(update, context)
-
-    await msg.reply_text(success, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    await msg.reply_text(
-        "Дякуємо! Оцінювач отримав місцезнаходження об'єкта.",
-        reply_markup=kb_back_menu(),
+    await context.bot.send_message(
+        msg.chat.id,
+        "Дякуємо! Оцінювач отримав місцезнаходження.",
+        reply_markup=kb_main(),
     )
     return MAIN_MENU
 
 
-async def handle_loc_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def handle_loc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    if query.data == "step_skip" and context.user_data.get("flow") == "full":
-        await query.edit_message_text("⏭ Геолокацію пропущено.")
-        return await _start_video(update, context)
     if query.data == "back_main":
         return await show_main_menu(update, context, edit=True)
     return LOC_RECEIVE
 
 
 # ══════════════════════════════════════════════════════════
-#  БЛОК 4: ВІДЕООГЛЯД
+#  БЛОК 3: ВІДЕОДЗВІНОК
 # ══════════════════════════════════════════════════════════
 
-async def _start_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    text = (
-        "🎥 *Відеоогляд об'єкта*\n\n"
-        "Оберіть *зручний час* для відеодзвінка з оцінювачем.\n\n"
-        "📅 Доступні дні: *Пн–Пт*\n"
-        "📲 Дзвінок відбудеться через *Telegram*"
-    )
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text, reply_markup=kb_video_slots(), parse_mode="Markdown"
-            )
-        except Exception:
-            await context.bot.send_message(
-                update.effective_chat.id,
-                text, reply_markup=kb_video_slots(), parse_mode="Markdown"
-            )
-    else:
-        await update.effective_message.reply_text(
-            text, reply_markup=kb_video_slots(), parse_mode="Markdown"
-        )
-    return VIDEO_TIME
-
-
-async def handle_video_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "back_main":
-        return await show_main_menu(update, context, edit=True)
-
-    if query.data.startswith("slot_"):
-        slot = query.data.replace("slot_", "")
-        context.user_data["video_slot"] = slot
-        tag = client_tag(update)
-
-        await _send_text_all(
-            context,
-            f"🎥 *ЗАПИТ НА ВІДЕООГЛЯД*\n\n{tag}\n\n"
-            f"⏰ Бажаний час: *{slot}*\n"
-            f"📅 Найближчий робочий день\n\n"
-            f"▶️ Зв'яжіться з клієнтом для підтвердження.",
-        )
-
-        if context.user_data.get("flow") == "full":
-            done = context.user_data.get("full_steps_done", [])
-            steps = "\n".join([
-                f"{'✅' if 'ident'    in done else '⏭'} Ідентифікація",
-                f"{'✅' if 'docs'     in done else '⏭'} Документи",
-                f"{'✅' if 'location' in done else '⏭'} Геолокація",
-                "✅ Відеоогляд — заплановано",
-            ])
-            await query.edit_message_text(
-                f"🎉 *Повну процедуру завершено!*\n\n{steps}\n\n"
-                f"⏰ Відеодзвінок: *{slot}* (Пн–Пт)\n\n"
-                "Дякуємо за довіру до *ОЦІНКА24*! 🏢\n"
-                "Ми зв'яжемося з вами для підтвердження.",
-                reply_markup=kb_back_menu(),
-                parse_mode="Markdown",
-            )
-        else:
-            await query.edit_message_text(
-                f"✅ *Запит на відеоогляд прийнято!*\n\n"
-                f"⏰ Бажаний час: *{slot}*\n"
-                f"📅 Найближчий робочий день (Пн–Пт)\n\n"
-                "📲 Оцінювач зв'яжеться для підтвердження.",
-                reply_markup=kb_back_menu(),
-                parse_mode="Markdown",
-            )
-        return MAIN_MENU
-
-    return VIDEO_TIME
-
-
-# ══════════════════════════════════════════════════════════
-#  ДОПОМІЖНІ ОБРОБНИКИ
-# ══════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════
-#  БЛОК 5: ВІДЕОДЗВІНОК (Jitsi Meet)
-# ══════════════════════════════════════════════════════════
-
-def generate_jitsi_room() -> str:
-    """Генерує унікальну назву кімнати Jitsi."""
-    uid = uuid.uuid4().hex[:12].upper()
-    return f"Otsinka24-{uid}"
-
-
-async def _start_videocall_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Простий flow відеодзвінка — генеруємо кімнату і просимо GPS."""
-    import uuid
-    query = update.callback_query
-    u = update.effective_user
-
-    # Одразу генеруємо кімнату
-    room_id   = uuid.uuid4().hex[:12].upper()
-    room      = f"Otsinka24-{room_id}"
-    jitsi_url = f"https://meet.jit.si/{room}"
-    context.user_data["jitsi_room"] = room
-    context.user_data["jitsi_url"]  = jitsi_url
-
-    phone = context.user_data.get("phone", "не вказано")
+async def start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    u     = update.effective_user
     ts    = datetime.now().strftime("%d.%m.%Y %H:%M")
+    room  = f"Otsinka24-{uuid.uuid4().hex[:12].upper()}"
+    jitsi = f"https://meet.jit.si/{room}"
 
-    # Надсилаємо сповіщення адміну одразу
+    context.user_data["jitsi_room"] = room
+    context.user_data["jitsi_url"]  = jitsi
+
+    # Сповіщення адміну одразу
     admin_msg = (
         f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n"
         f"{'─' * 28}\n"
         f"👤 *{u.full_name}*\n"
-        f"📞 {phone}\n"
         f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
         f"🕐 {ts}\n\n"
         f"📍 GPS — клієнт надсилає зараз...\n\n"
-        f"🔗 *Кімната:* `{room}`\n"
-        f"[📹 Приєднатися до відеодзвінка]({jitsi_url})\n\n"
+        f"🔗 Кімната: `{room}`\n"
+        f"[📹 Приєднатися до відеодзвінка]({jitsi})\n\n"
         f"⚡️ Клієнт підключається!\n"
         f"[✉️ Написати клієнту](tg://user?id={u.id})"
     )
-    await _send_text_all(context, admin_msg)
+    await send_all(context, admin_msg)
 
-    # Клієнту — кнопка Jitsi одразу
+    # Клієнту — кнопка входу
     try:
-        await query.edit_message_text(
-            "📹 *Відеоогляд розпочато!*\n\nОцінювач вже отримав сповіщення.",
+        await update.callback_query.edit_message_text(
+            "📹 *Відеоогляд розпочато!*\n\n"
+            "Оцінювач отримав сповіщення і незабаром підключиться.",
             parse_mode="Markdown",
         )
     except Exception:
         pass
 
-    # Просимо GPS через звичайну кнопку Telegram
-    gps_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 Надіслати геолокацію об'єкта", request_location=True)]],
-        one_time_keyboard=True,
-        resize_keyboard=True,
-    )
+    # Просимо GPS
     await context.bot.send_message(
         update.effective_chat.id,
         "📍 *Поділіться геолокацією об'єкта*\n\n"
         "Перебуваючи біля об'єкта натисніть кнопку нижче.\n"
         "_GPS прив'яжеться до вашого відеоогляду._",
         parse_mode="Markdown",
-        reply_markup=gps_kb,
+        reply_markup=kb_gps_videocall(),
     )
 
-    # Надсилаємо кнопку входу у кімнату
+    # Кнопка входу у кімнату
     await context.bot.send_message(
         update.effective_chat.id,
-        "👇 Натисніть щоб увійти у відеодзвінок:",
+        "👇 Натисніть щоб увійти у відеодзвінок з оцінювачем:",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi_url)
+            InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)
         ]])
     )
-    return VIDEO_CALL_LOC
+    return VIDEO_LOC
 
 
-async def _start_videocall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Крок 1 — запит геолокації перед дзвінком."""
-    text = (
-        "📹 *Відеодзвінок з оцінювачем*\n\n"
-        "*Крок 1 з 2* — Поділіться геолокацією обʼєкта\n\n"
-        "📍 Перебуваючи біля обʼєкта натисніть кнопку нижче,\n"
-        "або введіть адресу текстом.\n\n"
-        "_GPS-координати привʼяжуться до відеосесії._"
-    )
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-            )
-        except Exception:
-            await context.bot.send_message(
-                update.effective_chat.id,
-                text, reply_markup=kb_skip_or_back(), parse_mode="Markdown"
-            )
-        await context.bot.send_message(
-            update.effective_chat.id,
-            "👇 Натисніть кнопку або введіть адресу:",
-            reply_markup=kb_location(),
-        )
-    else:
-        await update.effective_message.reply_text(text, parse_mode="Markdown")
-        await update.effective_message.reply_text(
-            "👇 Натисніть або введіть адресу:",
-            reply_markup=kb_location(),
-        )
-    return VIDEO_CALL_LOC
-
-
-async def handle_videocall_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримали GPS від клієнта — оновлюємо оцінювача."""
-    msg = update.message
+async def handle_videocall_gps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    msg   = update.message
+    u     = msg.from_user
+    room  = context.user_data.get("jitsi_room", "—")
+    jitsi = context.user_data.get("jitsi_url", "")
 
     if msg.location:
         lat, lon = msg.location.latitude, msg.location.longitude
         maps_url = f"https://maps.google.com/?q={lat},{lon}"
-        u = update.effective_user
-        phone = context.user_data.get("phone", "не вказано")
-        room  = context.user_data.get("jitsi_room", "—")
 
-        # Оновлення адміну з GPS
-        gps_update = (
+        await send_all(
+            context,
             f"📍 *GPS ОБ'ЄКТА ОТРИМАНО*\n"
             f"{'─' * 28}\n"
-            f"👤 {u.full_name} | 📞 {phone}\n"
-            f"Кімната: `{room}`\n\n"
-            f"📍 `{lat:.6f}, {lon:.6f}`\n"
+            f"👤 {u.full_name} | 🆔 `{u.id}`\n"
+            f"🔗 Кімната: `{room}`\n\n"
+            f"📌 `{lat:.6f}, {lon:.6f}`\n"
             f"🗺 [Google Maps]({maps_url})"
         )
-        await _send_text_all(context, gps_update)
-        await _send_location_all(context, lat, lon)
+        await send_location_all(context, lat, lon)
 
         await msg.reply_text(
-            "✅ *GPS зафіксовано!*\n\nОцінювач отримав координати.",
+            f"✅ *GPS зафіксовано!*\n\n"
+            f"📌 `{lat:.5f}, {lon:.5f}`\n\n"
+            "Оцінювач отримав координати об'єкта.",
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardRemove(),
         )
+        if jitsi:
+            await context.bot.send_message(
+                msg.chat.id,
+                "👇 Ви можете увійти у відеодзвінок:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)
+                ]])
+            )
+
     elif msg.text and not msg.text.startswith("/"):
-        # Текстова адреса
         address = msg.text.strip()
-        u = update.effective_user
-        phone = context.user_data.get("phone", "не вказано")
-        room  = context.user_data.get("jitsi_room", "—")
-        await _send_text_all(
+        await send_all(
             context,
             f"📍 *АДРЕСА ОБ'ЄКТА*\n"
             f"👤 {u.full_name} | Кімната: `{room}`\n"
@@ -1144,108 +705,56 @@ async def handle_videocall_location(update: Update, context: ContextTypes.DEFAUL
         )
     else:
         await msg.reply_text("⚠️ Поділіться геолокацією кнопкою нижче.")
-        return VIDEO_CALL_LOC
+        return VIDEO_LOC
 
     return MAIN_MENU
 
 
-async def handle_videocall_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Пропуск геолокації — одразу генеруємо кімнату."""
+async def handle_video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-
     if query.data == "back_main":
         return await show_main_menu(update, context, edit=True)
-
-    # Генеруємо кімнату без геолокації
-    room = generate_jitsi_room()
-    jitsi_url = f"https://meet.jit.si/{room}"
-    u = update.effective_user
-    phone = context.user_data.get("phone", "не вказано")
-    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    admin_msg = (
-        f"📹 *ВІДЕОДЗВІНОК — ЗАПИТ*\n\n"
-        f"👤 *{u.full_name}*\n"
-        f"📞 {phone}\n"
-        f"🆔 `{u.id}` | @{u.username or chr(8212)}\n"
-        f"🕐 {ts}\n"
-        f"📍 Геолокацію не надано\n\n"
-        f"🔗 [Приєднатися до відеодзвінка]({jitsi_url})\n\n"
-        f"[✉️ Написати клієнту](tg://user?id={u.id})"
-    )
-    await _send_text_all(context, admin_msg)
-
-    await query.edit_message_text(
-        f"📹 *Відеокімната готова!*\n\nОцінювач незабаром приєднається.",
-        parse_mode="Markdown",
-    )
-    await context.bot.send_message(
-        update.effective_chat.id,
-        "🔗 Натисніть щоб увійти:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📹 Увійти у відеокімнату", url=jitsi_url)
-        ]])
-    )
-    return MAIN_MENU
+    return VIDEO_LOC
 
 
-async def handle_back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query:
-        await query.answer()
-    return await show_main_menu(update, context, edit=bool(query))
-
+# ══════════════════════════════════════════════════════════
+#  ЗБІРКА
+# ══════════════════════════════════════════════════════════
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"Помилка: {context.error}", exc_info=context.error)
 
 
-# ══════════════════════════════════════════════════════════
-#  ЗБІРКА ЗАСТОСУНКУ
-# ══════════════════════════════════════════════════════════
-
 def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # Web App data handler — група -1 (вищий пріоритет ніж ConversationHandler)
-    app.add_handler(
-        MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data),
-        group=-1
-    )
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
-            MAIN_MENU: [CallbackQueryHandler(handle_main_menu)],
-            IDENT_PASSPORT: [
-                MessageHandler(filters.PHOTO | filters.Document.ALL, handle_passport),
-                CallbackQueryHandler(handle_ident_skip, pattern="^(step_skip|back_main)$"),
+            MAIN_MENU: [
+                CallbackQueryHandler(handle_main_menu),
             ],
-            IDENT_PHONE: [
-                MessageHandler(filters.CONTACT | filters.TEXT & ~filters.COMMAND, handle_phone),
-                CallbackQueryHandler(handle_back_to_menu, pattern="^back_main$"),
+            DOC_OBJECT_TYPE: [
+                CallbackQueryHandler(handle_main_menu),
             ],
-            IDENT_SELFIE: [
-                MessageHandler(filters.PHOTO, handle_selfie),
-                CallbackQueryHandler(handle_back_to_menu, pattern="^back_main$"),
-            ],
-            DOC_CHOOSE: [CallbackQueryHandler(handle_doc_choose)],
             DOC_UPLOAD: [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_doc_upload),
-                CallbackQueryHandler(handle_doc_choose, pattern="^(doc_done|back_main)$"),
+                CallbackQueryHandler(handle_doc_callback),
             ],
             LOC_RECEIVE: [
-                MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, handle_location),
-                CallbackQueryHandler(handle_loc_skip, pattern="^(step_skip|back_main)$"),
-            ],
-            VIDEO_TIME: [CallbackQueryHandler(handle_video_time)],
-            VIDEO_CALL_LOC: [
                 MessageHandler(
                     (filters.LOCATION | filters.TEXT) & ~filters.COMMAND,
-                    handle_videocall_location,
+                    handle_location,
                 ),
-                CallbackQueryHandler(handle_videocall_skip, pattern="^(step_skip|back_main)$"),
+                CallbackQueryHandler(handle_loc_callback, pattern="^back_main$"),
+            ],
+            VIDEO_LOC: [
+                MessageHandler(
+                    (filters.LOCATION | filters.TEXT) & ~filters.COMMAND,
+                    handle_videocall_gps,
+                ),
+                CallbackQueryHandler(handle_video_callback, pattern="^back_main$"),
             ],
         },
         fallbacks=[
@@ -1253,7 +762,7 @@ def build_app() -> Application:
             CommandHandler("start",  cmd_start),
         ],
         allow_reentry=True,
-        name="otsinka24_conv",
+        name="otsinka24_v3",
     )
 
     app.add_handler(conv)
@@ -1262,10 +771,9 @@ def build_app() -> Application:
 
 
 def main() -> None:
-    logger.info("🚀 Запуск бота ОЦІНКА24 v2.0...")
+    logger.info("🚀 Запуск бота ОЦІНКА24 v3.0...")
     logger.info(f"   Адмінів: {len(ADMIN_IDS)}")
-    logger.info(f"   Канал:   {'налаштовано' if CHANNEL_ID else 'не налаштовано'}")
-    logger.info(f"   Web App: {'налаштовано' if WEBAPP_URL else 'не налаштовано'}")
+    logger.info(f"   Канал:   {'так' if CHANNEL_ID else 'ні'}")
     app = build_app()
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
