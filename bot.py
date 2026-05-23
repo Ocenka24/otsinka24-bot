@@ -46,15 +46,15 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 WEBSITE    = "https://ocenka24.com.ua/"
 INFO_EMAIL = "info@ocenka24.com.ua"
-HOTLINE    = "0 800 502-977"
-MOBILE     = "+38 (050) 3000-173"
+HOTLINE    = "0 800 502-977 (безкоштовно)"
+MOBILE     = "+38 (050) 3000-173 (WhatsApp, Viber)"
 LOGO_URL   = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
 # ── Типи об'єктів оцінки ──────────────────────────────────
 OBJECT_TYPES = {
     "obj_car": {
         "icon": "🚗",
-        "name": "Транспортний засіб",
+        "name": "Оцінка транспортного засобу",
         "docs": [
             "📋 Технічний паспорт (свідоцтво про реєстрацію)",
             "🪪 Документ що посвідчує особу",
@@ -64,7 +64,7 @@ OBJECT_TYPES = {
     },
     "obj_flat": {
         "icon": "🏠",
-        "name": "Квартира",
+        "name": "Оцінка квартири",
         "docs": [
             "📜 Правовстановлюючий документ",
             "📋 Технічний паспорт",
@@ -74,7 +74,7 @@ OBJECT_TYPES = {
     },
     "obj_house": {
         "icon": "🏡",
-        "name": "Житловий будинок",
+        "name": "Оцінка житлового будинку",
         "docs": [
             "📜 Правовстановлюючий документ на будинок",
             "📋 Технічний паспорт",
@@ -85,7 +85,7 @@ OBJECT_TYPES = {
     },
     "obj_land": {
         "icon": "🌿",
-        "name": "Земельна ділянка",
+        "name": "Оцінка земельної ділянки",
         "docs": [
             "📜 Правовстановлюючий документ на землю",
             "🪪 Документ що посвідчує особу",
@@ -94,7 +94,7 @@ OBJECT_TYPES = {
     },
     "obj_nonresidential": {
         "icon": "🏭",
-        "name": "Нежитлові будівлі та споруди",
+        "name": "Оцінка нежитлової будівлі/споруди",
         "docs": [
             "📜 Правовстановлюючий документ",
             "📋 Технічний паспорт",
@@ -120,13 +120,13 @@ OBJECT_TYPES = {
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚗 Транспортний засіб",         callback_data="obj_car")],
-        [InlineKeyboardButton("🏠 Квартира",                   callback_data="obj_flat")],
-        [InlineKeyboardButton("🏡 Житловий будинок",           callback_data="obj_house")],
-        [InlineKeyboardButton("🌿 Земельна ділянка",           callback_data="obj_land")],
-        [InlineKeyboardButton("🏭 Нежитлові будівлі/споруди",  callback_data="obj_nonresidential")],
-        [InlineKeyboardButton("📹 Онлайн відеоогляд",          callback_data="menu_video")],
-        [InlineKeyboardButton("📍 Геолокація об'єкта",         callback_data="menu_location")],
+        [InlineKeyboardButton("🚗 Оцінка транспортного засобу",       callback_data="obj_car")],
+        [InlineKeyboardButton("🏠 Оцінка квартири",                   callback_data="obj_flat")],
+        [InlineKeyboardButton("🏡 Оцінка житлового будинку",          callback_data="obj_house")],
+        [InlineKeyboardButton("🌿 Оцінка земельної ділянки",          callback_data="obj_land")],
+        [InlineKeyboardButton("🏭 Оцінка нежитлової будівлі/споруди", callback_data="obj_nonresidential")],
+        [InlineKeyboardButton("📹 Онлайн відеоогляд об'єкта оцінки",  callback_data="menu_video")],
+        [InlineKeyboardButton("📍 Геолокація об'єкта оцінки",         callback_data="menu_location")],
         [
             InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about"),
             InlineKeyboardButton("📞 Контакти",     callback_data="menu_contact"),
@@ -244,7 +244,8 @@ async def send_location_all(context: ContextTypes.DEFAULT_TYPE, lat: float, lon:
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False) -> int:
     text = (
         "🏢 *ОЦІНКА24* — професійна оцінка майна\n\n"
-        "Оберіть потрібну дію:"
+        "Для проведення оцінки оберіть тип об'єкта і надішліть "
+        "документи або проведіть онлайн відеоогляд."
     )
     if edit and update.callback_query:
         try:
@@ -273,21 +274,28 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     caption = (
         f"👋 Вітаємо, *{u.first_name}*!\n\n"
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
-        "Оберіть тип об'єкта і надішліть документи,\n"
-        "або проведіть онлайн відеоогляд.\n\n"
-        f"☎️ {HOTLINE}  |  📱 {MOBILE}\n"
+        "Для проведення оцінки оберіть тип об'єкта і надішліть "
+        "документи або проведіть онлайн відеоогляд.\n\n"
+        f"☎️ {HOTLINE}\n"
+        f"📱 {MOBILE}\n"
         f"📧 {INFO_EMAIL}\n"
         f"🌐 {WEBSITE}\n\n"
         "👇 Оберіть дію:"
     )
     try:
+        # Telegram автоматично масштабує фото під розмір екрана пристрою
         await update.message.reply_photo(
-            photo=LOGO_URL, caption=caption,
-            parse_mode="Markdown", reply_markup=kb_main(),
+            photo=LOGO_URL,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=kb_main(),
         )
     except Exception:
+        # Fallback: якщо логотип недоступний — надсилаємо без фото
         await update.message.reply_text(
-            caption, parse_mode="Markdown", reply_markup=kb_main()
+            "🏢 " + caption,
+            parse_mode="Markdown",
+            reply_markup=kb_main()
         )
     return MAIN_MENU
 
