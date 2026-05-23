@@ -120,9 +120,13 @@ OBJECT_TYPES = {
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Документи для оцінки",   callback_data="menu_docs")],
-        [InlineKeyboardButton("📹 Онлайн відеоогляд",      callback_data="menu_video")],
-        [InlineKeyboardButton("📍 Геолокація об'єкта",     callback_data="menu_location")],
+        [InlineKeyboardButton("🚗 Транспортний засіб",         callback_data="obj_car")],
+        [InlineKeyboardButton("🏠 Квартира",                   callback_data="obj_flat")],
+        [InlineKeyboardButton("🏡 Житловий будинок",           callback_data="obj_house")],
+        [InlineKeyboardButton("🌿 Земельна ділянка",           callback_data="obj_land")],
+        [InlineKeyboardButton("🏭 Нежитлові будівлі/споруди",  callback_data="obj_nonresidential")],
+        [InlineKeyboardButton("📹 Онлайн відеоогляд",          callback_data="menu_video")],
+        [InlineKeyboardButton("📍 Геолокація об'єкта",         callback_data="menu_location")],
         [
             InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about"),
             InlineKeyboardButton("📞 Контакти",     callback_data="menu_contact"),
@@ -141,15 +145,11 @@ def kb_object_types() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def kb_doc_upload(obj_key: str, uploaded: int, total: int) -> InlineKeyboardMarkup:
-    obj = OBJECT_TYPES[obj_key]
+def kb_doc_upload(obj_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"✅ Завершити ({uploaded}/{total} надіслано)",
-            callback_data="doc_done"
-        )],
-        [InlineKeyboardButton("🔄 Інший тип об'єкта", callback_data="menu_docs")],
-        [InlineKeyboardButton("🏠 Головне меню",       callback_data="back_main")],
+        [InlineKeyboardButton("✅ Завершити надсилання", callback_data="doc_done")],
+        [InlineKeyboardButton("🔄 Інший тип об'єкта",   callback_data="back_main")],
+        [InlineKeyboardButton("🏠 Головне меню",         callback_data="back_main")],
     ])
 
 
@@ -273,10 +273,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     caption = (
         f"👋 Вітаємо, *{u.first_name}*!\n\n"
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
-        "Через цього бота ви можете:\n"
-        "• 📄 Надіслати документи для оцінки\n"
-        "• 📹 Провести онлайн відеоогляд\n"
-        "• 📍 Вказати місцезнаходження об'єкта\n\n"
+        "Оберіть тип об'єкта і надішліть документи,\n"
+        "або проведіть онлайн відеоогляд.\n\n"
         f"☎️ {HOTLINE}  |  📱 {MOBILE}\n"
         f"📧 {INFO_EMAIL}\n"
         f"🌐 {WEBSITE}\n\n"
@@ -311,9 +309,6 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if data == "back_main":
         return await show_main_menu(update, context, edit=True)
-
-    if data == "menu_docs":
-        return await start_docs(update, context)
 
     if data == "menu_video":
         return await start_videocall(update, context)
@@ -406,13 +401,13 @@ async def select_object_type(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         await update.callback_query.edit_message_text(
             text,
-            reply_markup=kb_doc_upload(obj_key, 0, len(obj["docs"])),
+            reply_markup=kb_doc_upload(obj_key),
             parse_mode="Markdown"
         )
     except Exception:
         await context.bot.send_message(
             update.effective_chat.id, text,
-            reply_markup=kb_doc_upload(obj_key, 0, len(obj["docs"])),
+            reply_markup=kb_doc_upload(obj_key),
             parse_mode="Markdown"
         )
     return DOC_UPLOAD
@@ -433,12 +428,9 @@ async def handle_doc_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return DOC_UPLOAD
 
     uploaded.append(file_id)
-    u     = msg.from_user
-    total = len(obj.get("docs", []))
-    count = len(uploaded)
+    u = msg.from_user
 
     caption = (
-        f"📄 Документ #{count}\n"
         f"{obj.get('icon','')} {obj.get('name','')}\n"
         f"👤 {u.full_name} | 🆔 `{u.id}`\n"
         f"📱 @{u.username or '—'}"
@@ -449,12 +441,10 @@ async def handle_doc_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     else:
         await send_doc_all(context, file_id, caption)
 
-    progress = "✅" * count + "⬜" * max(0, total - count)
     await msg.reply_text(
-        f"✅ Документ #{count} отримано!\n\n"
-        f"Прогрес: {progress} ({count}/{total})\n\n"
-        f"{'Надсилайте наступний документ або натисніть «Завершити».' if count < total else '🎉 Всі документи надіслано! Натисніть «Завершити».'}",
-        reply_markup=kb_doc_upload(obj_key, count, total),
+        f"✅ Файл прийнято! Всього: {len(uploaded)} шт.\n\n"
+        "Надсилайте ще файли або натисніть «✅ Завершити надсилання».",
+        reply_markup=kb_doc_upload(obj_key),
     )
     return DOC_UPLOAD
 
@@ -469,8 +459,8 @@ async def finish_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     if not uploaded:
         await query.edit_message_text(
-            "⚠️ Ви ще не надіслали жодного документа.\nНадішліть хоча б один файл.",
-            reply_markup=kb_doc_upload(obj_key, 0, len(obj.get("docs", []))),
+            "⚠️ Ви ще не надіслали жодного файлу.\nНадішліть хоча б один файл.",
+            reply_markup=kb_doc_upload(obj_key),
         )
         return DOC_UPLOAD
 
@@ -506,8 +496,6 @@ async def handle_doc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "back_main":
         return await show_main_menu(update, context, edit=True)
-    if data == "menu_docs":
-        return await start_docs(update, context)
     if data == "doc_done":
         return await finish_docs(update, context)
     if data in OBJECT_TYPES:
