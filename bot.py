@@ -276,8 +276,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
         "Для проведення оцінки оберіть тип об'єкта і надішліть "
         "документи або проведіть онлайн відеоогляд.\n\n"
-        f"☎️ {HOTLINE}\n"
-        f"📱 {MOBILE}\n"
+        f"☎️ [0 800 502-977](tel:0800502977) (безкоштовно)\n"
+        f"📱 [+38 (050) 3000-173](tel:+380503000173) (WhatsApp, Viber)\n"
         f"📧 {INFO_EMAIL}\n"
         f"🌐 {WEBSITE}\n\n"
         "👇 Оберіть дію:"
@@ -345,8 +345,8 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "menu_contact":
         await query.edit_message_text(
             "📞 *Контакти ОЦІНКА24*\n\n"
-            f"☎️ Гаряча лінія: `{HOTLINE}`\n"
-            f"📱 Мобільний: `{MOBILE}`\n"
+            f"☎️ [0 800 502-977](tel:0800502977) — безкоштовно\n"
+            f"📱 [+38 (050) 3000-173](tel:+380503000173) — WhatsApp, Viber\n"
             f"📧 `{INFO_EMAIL}`\n"
             f"🌐 {WEBSITE}\n\n"
             "🕐 *Графік роботи:*\n"
