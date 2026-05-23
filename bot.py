@@ -276,11 +276,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
         "Для проведення оцінки оберіть тип об'єкта і надішліть "
         "документи або проведіть онлайн відеоогляд.\n\n"
-        f"☎️ 0 800 502-977 (безкоштовно)\n"
-        f"📱 +38 (050) 3000-173 (WhatsApp, Viber)\n"
+        f"☎️ 0 800 502\u2011977\n"
+        f"📱 +38 (050) 3000\u2011173\n"
         f"📧 {INFO_EMAIL}\n"
-        f"🌐 {WEBSITE}\n\n"
-        "👇 Оберіть дію:"
+        f"🌐 {WEBSITE}"
     )
     try:
         # Telegram автоматично масштабує фото під розмір екрана пристрою
@@ -298,14 +297,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=kb_main()
         )
 
-    # Кнопки для швидкого дзвінка
-    await update.message.reply_text(
-        "📞 Зателефонуйте нам:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📞 0 800 502-977", url="tel:0800502977"),
-            InlineKeyboardButton("📱 050 3000-173",  url="tel:+380503000173"),
-        ]])
-    )
     return MAIN_MENU
 
 
@@ -354,8 +345,8 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if data == "menu_contact":
         await query.edit_message_text(
             "📞 *Контакти ОЦІНКА24*\n\n"
-            f"☎️ 0 800 502-977 (безкоштовно)\n"
-            f"📱 +38 (050) 3000-173 (WhatsApp, Viber)\n"
+            f"☎️ 0 800 502\u2011977\n"
+            f"📱 +38 (050) 3000\u2011173\n"
             f"📧 `{INFO_EMAIL}`\n"
             f"🌐 {WEBSITE}\n\n"
             "🕐 *Графік роботи:*\n"
@@ -363,10 +354,6 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Сб: 09:00–14:00 (за записом)\n"
             "Нд: вихідний",
             reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📞 0 800 502-977", url="tel:0800502977"),
-                    InlineKeyboardButton("📱 050 3000-173",  url="tel:+380503000173"),
-                ],
                 [InlineKeyboardButton("ℹ️ Про компанію", callback_data="menu_about")],
                 [InlineKeyboardButton("🏠 Головне меню", callback_data="back_main")],
             ]),
