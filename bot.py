@@ -43,7 +43,7 @@ CALL_PHONE    = f"tel:{PHONE2.replace(' ','').replace('(','').replace(')','').re
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, CALL_MENU = range(6)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, CALL_MENU, PHONE = range(7)
 
 # ── Об'єкти оцінки ────────────────────────────────────────
 OBJECTS = {
@@ -94,7 +94,6 @@ def main_kb():
         [InlineKeyboardButton("📹 Онлайн відеоогляд об'єкта оцінки",  callback_data="video")],
         [InlineKeyboardButton("📍 Геолокація об'єкта оцінки",         callback_data="location")],
         [InlineKeyboardButton("📸 Фото+GPS об'єкта",                  callback_data="photogps")],
-        [InlineKeyboardButton("📞 Зателефонувати нам",                callback_data="call")],
         [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
          InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
     ])
@@ -380,7 +379,17 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                                       parse_mode="Markdown", reply_markup=main_kb())
     except Exception:
         await upd.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb())
-    return MENU
+    # Запитуємо номер телефону
+    await upd.message.reply_text(
+        "📱 *Для зв'язку з вами* вкажіть номер телефону:\n\n"
+        "Натисніть кнопку або введіть вручну (+380...)",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup(
+            [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
+            one_time_keyboard=True, resize_keyboard=True
+        )
+    )
+    return PHONE
 
 
 async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -393,6 +402,34 @@ async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════════
 #  ГОЛОВНЕ МЕНЮ
 # ══════════════════════════════════════════════════════════
+
+async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отримуємо номер телефону клієнта."""
+    msg = upd.message
+    if msg.contact:
+        phone = msg.contact.phone_number
+        if not phone.startswith("+"): phone = "+" + phone
+    elif msg.text and (msg.text.startswith("+") or msg.text.startswith("0")):
+        phone = msg.text.strip()
+    else:
+        await msg.reply_text(
+            "⚠️ Введіть номер телефону у форматі +380XXXXXXXXX\nабо натисніть кнопку нижче.",
+            parse_mode="Markdown")
+        return PHONE
+
+    ctx.user_data["phone"] = phone
+    u = msg.from_user
+    logger.info(f"Телефон клієнта {u.id}: {phone}")
+
+    await msg.reply_text(
+        f"✅ Дякуємо, *{u.first_name}*! Номер збережено.\n\n👇 Оберіть дію:",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await ctx.bot.send_message(upd.effective_chat.id,
+        "🏠 Головне меню:", reply_markup=main_kb())
+    return MENU
+
 
 async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
@@ -431,7 +468,6 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             "🕐 *Графік:*\nПн–Пт: 09:00–18:00\n"
             "Сб: 09:00–14:00 (за записом)\nНд: вихідний",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("📞 Зателефонувати", callback_data="call")],
                 [InlineKeyboardButton("ℹ️ Про компанію",   callback_data="about")],
                 [InlineKeyboardButton("🏠 Головне меню",   callback_data="home")],
             ]))
@@ -511,7 +547,8 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     u     = msg.from_user
     name  = ctx.user_data.get("obj_name","Документ")
     files = ctx.user_data.setdefault("files",[])
-    caption = f"{name}\n👤 {u.full_name} | 🆔 `{u.id}`\n📱 @{u.username or '—'}"
+    phone   = ctx.user_data.get("phone","—")
+    caption = f"{name}\n👤 {u.full_name} | 🆔 `{u.id}`\n📱 @{u.username or '—'} | ☎️ {phone}"
 
     if msg.photo:
         # Для документів — без геотегу, просто пересилаємо
@@ -679,10 +716,11 @@ async def start_video(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     url  = f"https://meet.jit.si/{room}"
     ctx.user_data["jitsi"] = url
 
+    phone = ctx.user_data.get("phone","—")
     await notify(ctx,
         f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n{'─'*28}\n"
         f"👤 *{u.full_name}* | 🆔 `{u.id}`\n"
-        f"📱 @{u.username or '—'}\n🕐 {ts}\n\n"
+        f"📱 @{u.username or '—'} | ☎️ {phone}\n🕐 {ts}\n\n"
         f"🔗 `{room}`\n"
         f"[📹 Приєднатися]({url})\n\n"
         f"⚡️ Клієнт підключається!\n"
@@ -751,6 +789,10 @@ def build():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
+            PHONE:    [MessageHandler(
+                (filters.CONTACT | filters.TEXT) & ~filters.COMMAND,
+                handle_phone
+            )],
             MENU:     [CallbackQueryHandler(on_menu)],
             UPLOAD:   [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
