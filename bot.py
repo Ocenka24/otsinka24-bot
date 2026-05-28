@@ -1,24 +1,17 @@
 #!/usr/bin/env python3
-"""ОЦІНКА24 — Telegram Bot v4.3 | Google Maps + IP Geolocation + Watermark"""
+"""ОЦІНКА24 — Telegram Bot v4.5"""
 
-import logging
-import os
-import uuid
+import asyncio, logging, os, uuid
 from datetime import datetime
 from io import BytesIO
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-import requests
-from PIL import Image, ImageDraw, ImageFont
-from geopy.geocoders import Nominatim
 from dotenv import load_dotenv
-
 load_dotenv()
 
-import googlemaps
-
+from PIL import Image, ImageDraw, ImageFont
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove,
@@ -32,48 +25,45 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 # ── Конфіг ────────────────────────────────────────────────
-BOT_TOKEN           = os.getenv("BOT_TOKEN", "")
-ADMIN_IDS           = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
-WEBSITE             = "https://ocenka24.com.ua/"
-EMAIL               = "info@ocenka24.com.ua"
-PHONE1              = "0 800 502-977"
-PHONE2              = "+38 (050) 3000-173"
-LOGO                = "https://ocenka24.com.ua/img/ocenka24-logo.png"
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
-IPGEO_API_KEY       = "836ef1c604514a50a4a315be1f114f34"   # Ваш ключ
+BOT_TOKEN  = os.getenv("BOT_TOKEN","")
+ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit()]
+CHANNEL_ID = int(os.getenv("CHANNEL_ID","0"))
+WEBSITE    = "https://ocenka24.com.ua/"
+EMAIL      = "info@ocenka24.com.ua"
+PHONE1     = "0 800 502-977"
+PHONE2     = "+38 (050) 3000-173"
+LOGO       = "https://ocenka24.com.ua/img/ocenka24-logo.png"
+GMAPS_KEY  = os.getenv("GOOGLE_MAPS_API_KEY","")
 
-# Ініціалізація API
-geolocator_nominatim = Nominatim(user_agent="ocenka24_bot")
-gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY) if GOOGLE_MAPS_API_KEY else None
+assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Об'єкти оцінки ────────────────────────────────────────
 OBJECTS = {
-    "car": ("🚗", "Оцінка транспортного засобу", [
+    "car":   ("🚗","Оцінка транспортного засобу",[
         "📋 Технічний паспорт (свідоцтво про реєстрацію)",
         "🪪 Документ що посвідчує особу",
         "📸 Фото ТЗ ззовні з 4 кутів",
         "📸 Фото салону, пробігу та VIN-коду",
     ]),
-    "flat": ("🏠", "Оцінка квартири", [
+    "flat":  ("🏠","Оцінка квартири",[
         "📜 Правовстановлюючий документ",
         "📋 Технічний паспорт",
         "🪪 Документ що посвідчує особу",
         "📸 Фото кімнат, кухні, служб",
     ]),
-    "house": ("🏡", "Оцінка житлового будинку", [
+    "house": ("🏡","Оцінка житлового будинку",[
         "📜 Правовстановлюючий документ на будинок",
         "📋 Технічний паспорт",
         "📜 Правовстановлюючий документ на землю",
         "🪪 Документ що посвідчує особу",
         "📸 Фото будинку ззовні з 4 кутів та всередині",
     ]),
-    "land": ("🌿", "Оцінка земельної ділянки", [
+    "land":  ("🌿","Оцінка земельної ділянки",[
         "📜 Правовстановлюючий документ на землю",
         "🪪 Документ що посвідчує особу",
         "📸 Фото ділянки (4-6 штук)",
     ]),
-    "nonres": ("🏭", "Оцінка нежитлової будівлі/споруди", [
+    "nonres":("🏭","Оцінка нежитлової будівлі/споруди",[
         "📜 Правовстановлюючий документ",
         "📋 Технічний паспорт",
         "🪪 Документ що посвідчує особу / юридичну особу",
@@ -81,8 +71,7 @@ OBJECTS = {
     ]),
 }
 
-# ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC = range(4)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS = range(5)
 
 
 # ══════════════════════════════════════════════════════════
@@ -98,10 +87,10 @@ def main_kb():
         [InlineKeyboardButton("🏭 Оцінка нежитлової будівлі/споруди", callback_data="obj_nonres")],
         [InlineKeyboardButton("📹 Онлайн відеоогляд об'єкта оцінки",  callback_data="video")],
         [InlineKeyboardButton("📍 Геолокація об'єкта оцінки",         callback_data="location")],
+        [InlineKeyboardButton("📸 Фото+GPS об'єкта",                  callback_data="photogps")],
         [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
          InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
     ])
-
 
 def upload_kb():
     return InlineKeyboardMarkup([
@@ -109,178 +98,317 @@ def upload_kb():
         [InlineKeyboardButton("🏠 Головне меню",         callback_data="home")],
     ])
 
-
 def gps_kb(label="📍 Поділитися геолокацією"):
     return ReplyKeyboardMarkup(
         [[KeyboardButton(label, request_location=True)]],
-        one_time_keyboard=True, resize_keyboard=True
-    )
-
+        one_time_keyboard=True, resize_keyboard=True)
 
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Головне меню", callback_data="home")]])
 
 
 # ══════════════════════════════════════════════════════════
-#  WATERMARK + АДРЕСА (Google + IPGeo + Nominatim)
+#  РОЗСИЛКА
 # ══════════════════════════════════════════════════════════
 
-def add_watermark(image: Image.Image) -> Image.Image:
-    draw = ImageDraw.Draw(image)
-    try:
-        font = ImageFont.truetype("arial.ttf", 70)
-    except:
+async def notify(ctx, text):
+    targets = list(ADMIN_IDS) + ([CHANNEL_ID] if CHANNEL_ID else [])
+    for tid in set(targets):
+        try: await ctx.bot.send_message(tid, text, parse_mode="Markdown")
+        except Exception as e: logger.warning(f"notify {tid}: {e}")
+
+async def notify_photo(ctx, data, caption):
+    targets = list(ADMIN_IDS) + ([CHANNEL_ID] if CHANNEL_ID else [])
+    for tid in set(targets):
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 70)
-        except:
-            font = ImageFont.load_default()
+            if isinstance(data, BytesIO):
+                data.seek(0)
+                await ctx.bot.send_photo(tid, data, caption=caption, parse_mode="Markdown")
+            else:
+                await ctx.bot.send_photo(tid, data, caption=caption, parse_mode="Markdown")
+        except Exception as e: logger.warning(f"notify_photo {tid}: {e}")
 
-    text = "ОЦІНКА24"
-    bbox = draw.textbbox((0, 0), text, font=font)
-    x = image.width - bbox[2] - 40
-    y = image.height - bbox[3] - 40
+async def notify_doc(ctx, fid, caption):
+    targets = list(ADMIN_IDS) + ([CHANNEL_ID] if CHANNEL_ID else [])
+    for tid in set(targets):
+        try: await ctx.bot.send_document(tid, fid, caption=caption, parse_mode="Markdown")
+        except Exception as e: logger.warning(f"notify_doc {tid}: {e}")
 
-    draw.text((x + 4, y + 4), text, font=font, fill=(0, 0, 0, 180))
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 230))
-    return image
+async def notify_loc(ctx, lat, lon):
+    targets = list(ADMIN_IDS) + ([CHANNEL_ID] if CHANNEL_ID else [])
+    for tid in set(targets):
+        try: await ctx.bot.send_location(tid, lat, lon)
+        except Exception as e: logger.warning(f"notify_loc {tid}: {e}")
 
 
-def get_address_google(lat: float, lon: float) -> str:
-    if not gmaps:
+# ══════════════════════════════════════════════════════════
+#  ОБРОБКА ФОТО: WATERMARK + МІНІ-КАРТА + АДРЕСА
+# ══════════════════════════════════════════════════════════
+
+def _load_font(size: int) -> ImageFont.ImageFont:
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+    ]
+    for p in paths:
+        try: return ImageFont.truetype(p, size)
+        except: pass
+    return ImageFont.load_default()
+
+
+def _fetch_bytes_sync(url: str) -> bytes | None:
+    """Синхронне завантаження — запускається в executor."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=8) as r:
+            return r.read()
+    except Exception as e:
+        logger.warning(f"fetch {url}: {e}")
         return None
+
+
+async def _fetch(url: str) -> bytes | None:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _fetch_bytes_sync, url)
+
+
+def _get_exif_gps(image: Image.Image):
+    """Повертає (lat, lon) або (None, None)."""
     try:
-        result = gmaps.reverse_geocode((lat, lon), language="uk")
-        if result:
-            return result[0]['formatted_address']
+        from PIL.ExifTags import TAGS, GPSTAGS
+        exif_data = image._getexif()
+        if not exif_data:
+            return None, None
+        gps_info = {}
+        for tag, val in exif_data.items():
+            name = TAGS.get(tag, tag)
+            if name == "GPSInfo":
+                for t, v in val.items():
+                    gps_info[GPSTAGS.get(t, t)] = v
+        if not gps_info:
+            return None, None
+        def to_deg(v):
+            return float(v[0]) + float(v[1])/60 + float(v[2])/3600
+        lat = to_deg(gps_info["GPSLatitude"])
+        lon = to_deg(gps_info["GPSLongitude"])
+        if gps_info.get("GPSLatitudeRef")  == "S": lat = -lat
+        if gps_info.get("GPSLongitudeRef") == "W": lon = -lon
+        return lat, lon
     except Exception as e:
-        logger.warning(f"Google Maps error: {e}")
+        logger.warning(f"EXIF GPS: {e}")
+        return None, None
+
+
+async def _get_address(lat: float, lon: float) -> str:
+    """Визначення адреси через Nominatim (без зовнішніх платних ключів)."""
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse"
+        f"?lat={lat}&lon={lon}&format=json&accept-language=uk"
+    )
+    data = await _fetch(url)
+    if data:
+        import json
+        try:
+            j = json.loads(data)
+            return j.get("display_name", "")
+        except Exception:
+            pass
+    return ""
+
+
+async def _get_map_image(lat: float, lon: float, size=280) -> Image.Image | None:
+    """Завантажує міні-карту з OpenStreetMap Static Maps."""
+    # Використовуємо безкоштовний staticmap сервіс
+    url = (
+        f"https://staticmap.openstreetmap.de/staticmap.php"
+        f"?center={lat},{lon}&zoom=16&size={size}x{size}"
+        f"&markers={lat},{lon},lightblue1"
+    )
+    data = await _fetch(url)
+    if data:
+        try:
+            return Image.open(BytesIO(data)).convert("RGB")
+        except Exception:
+            pass
+
+    # Fallback: Google Static Maps (якщо є ключ)
+    if GMAPS_KEY:
+        url2 = (
+            f"https://maps.googleapis.com/maps/api/staticmap"
+            f"?center={lat},{lon}&zoom=16&size={size}x{size}"
+            f"&markers=color:red%7C{lat},{lon}&key={GMAPS_KEY}"
+        )
+        data2 = await _fetch(url2)
+        if data2:
+            try: return Image.open(BytesIO(data2)).convert("RGB")
+            except Exception: pass
     return None
 
 
-def get_address_ipgeo(lat: float, lon: float) -> str:
-    try:
-        url = f"https://api.ipgeolocation.io/ipgeo?lat={lat}&lon={lon}&apiKey={IPGEO_API_KEY}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            city = data.get("city", "")
-            country = data.get("country_name", "")
-            return f"{city}, {country}".strip(", ")
-    except Exception as e:
-        logger.warning(f"IPGeolocation error: {e}")
-    return None
+async def build_geotagged_photo(
+    photo_bytes: bytes,
+    lat: float | None,
+    lon: float | None,
+    address: str,
+    ts: str,
+) -> BytesIO:
+    """
+    Накладає на фото:
+      • водяний знак ОЦІНКА24 (правий нижній кут)
+      • GPS координати + адреса (лівий нижній кут)
+      • дата/час (правий верхній кут)
+      • міні-карту (лівий верхній кут, якщо є GPS)
+    """
+    img = Image.open(BytesIO(photo_bytes)).convert("RGB")
+    W, H = img.size
 
+    # ── Розміри шрифтів пропорційно до фото ─────────────
+    fsz_big  = max(28, W // 30)
+    fsz_sml  = max(22, W // 40)
+    font_big = _load_font(fsz_big)
+    font_sml = _load_font(fsz_sml)
 
-async def process_photo_with_geotag(photo_file):
-    photo_bytes = await photo_file.download_as_bytearray()
-    image = Image.open(BytesIO(photo_bytes)).convert("RGB")
+    pad   = max(16, W // 60)
+    strip = fsz_big + fsz_sml * 3 + pad * 5   # висота нижньої смуги
 
-    lat = lon = address = None
-
-    # Витягуємо GPS з EXIF
-    try:
-        exif = image._getexif()
-        if exif and 34853 in exif:
-            gps = exif[34853]
-            def get_coord(val):
-                return float(val[0]) + float(val[1])/60 + float(val[2])/3600
-            lat = get_coord(gps.get(2))
-            if gps.get(1) == 'S': lat = -lat
-            lon = get_coord(gps.get(4))
-            if gps.get(3) == 'W': lon = -lon
-    except Exception as e:
-        logger.warning(f"EXIF error: {e}")
-
-    # Визначення адреси (пріоритет: Google → IPGeo → Nominatim)
+    # ── Міні-карта (лівий верхній кут) ───────────────────
+    map_size = min(W // 4, 240)
+    map_img  = None
     if lat and lon:
-        address = get_address_google(lat, lon)
-        if not address:
-            address = get_address_ipgeo(lat, lon)
-        if not address:
-            try:
-                loc = geolocator_nominatim.reverse((lat, lon), language="uk", timeout=10)
-                address = loc.address if loc else None
-            except Exception as e:
-                logger.warning(f"Nominatim error: {e}")
+        map_img = await _get_map_image(lat, lon, size=map_size)
 
-    image = add_watermark(image)
+    # ── Нижня напівпрозора смуга ─────────────────────────
+    overlay = Image.new("RGBA", (W, strip), (0, 0, 0, 0))
+    bar     = Image.new("RGBA", (W, strip), (0, 0, 0, 175))
+    overlay.paste(bar, (0, 0))
+    img_rgba = img.convert("RGBA")
+    bar_y    = H - strip
+    img_rgba.paste(overlay, (0, bar_y), mask=overlay)
+    img = img_rgba.convert("RGB")
+    draw = ImageDraw.Draw(img)
 
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=88, optimize=True)
-    output.seek(0)
+    # ── Вміст нижньої смуги ───────────────────────────────
+    y = bar_y + pad
 
-    return output, lat, lon, address or "Адресу не вдалося визначити"
+    # ОЦІНКА24 — великий текст
+    draw.text((pad+2, y+2), "ОЦІНКА24", font=font_big, fill=(0,0,0))
+    draw.text((pad,   y),   "ОЦІНКА24", font=font_big, fill=(255,200,0))
+    y += fsz_big + pad // 2
+
+    # GPS координати
+    if lat and lon:
+        gps_text = f"📍 {lat:.6f}, {lon:.6f}"
+        draw.text((pad+1, y+1), gps_text, font=font_sml, fill=(0,0,0))
+        draw.text((pad,   y),   gps_text, font=font_sml, fill=(255,255,255))
+        y += fsz_sml + 4
+
+    # Адреса (обрізаємо якщо довга)
+    if address:
+        max_chars = W // (fsz_sml // 2 + 2)
+        addr_short = address[:max_chars] + ("…" if len(address) > max_chars else "")
+        draw.text((pad+1, y+1), addr_short, font=font_sml, fill=(0,0,0))
+        draw.text((pad,   y),   addr_short, font=font_sml, fill=(200,230,255))
+        y += fsz_sml + 4
+
+    # Дата/час — правий нижній кут смуги
+    draw.text((W - len(ts)*fsz_sml//2 - pad + 1, bar_y + pad + 1), ts, font=font_sml, fill=(0,0,0))
+    draw.text((W - len(ts)*fsz_sml//2 - pad,     bar_y + pad),     ts, font=font_sml, fill=(180,255,180))
+
+    # ── Вставка міні-карти ────────────────────────────────
+    if map_img:
+        border = 4
+        mw, mh  = map_img.size
+        # Рамка навколо карти
+        frame = Image.new("RGB", (mw+border*2, mh+border*2), (255,200,0))
+        frame.paste(map_img, (border, border))
+        img.paste(frame, (pad, pad))
+
+        # Підпис під картою
+        draw.text((pad + border + 1, pad + mh + border*2 + 3 + 1), "ОЦІНКА24", font=font_sml, fill=(0,0,0))
+        draw.text((pad + border,     pad + mh + border*2 + 3),     "ОЦІНКА24", font=font_sml, fill=(255,200,0))
+
+    # ── Збереження ────────────────────────────────────────
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=88, optimize=True)
+    out.seek(0)
+    return out
 
 
 # ══════════════════════════════════════════════════════════
-#  КОМАНДИ ТА ОБРОБНИКИ
+#  /start та /cancel
 # ══════════════════════════════════════════════════════════
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.clear()
-    u = update.effective_user
-
+async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data.clear()
+    u = upd.effective_user
     text = (
         f"👋 Вітаємо, *{u.first_name}*!\n\n"
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
         "Для проведення оцінки оберіть тип об'єкта і надішліть "
         "документи або проведіть онлайн відеоогляд.\n\n"
-        f"☎️ {PHONE1} (безкоштовно)\n"
-        f"📱 {PHONE2} (WhatsApp, Viber)\n"
+        f"☎️ {PHONE1}\n"
+        f"📱 {PHONE2}\n"
         f"📧 {EMAIL}\n"
-        f"🌐 {WEBSITE}\n\n"
-        "👇 Оберіть дію:"
+        f"🌐 {WEBSITE}"
     )
-
     try:
-        await update.message.reply_photo(
-            photo=LOGO, caption=text,
-            parse_mode="Markdown", reply_markup=main_kb()
-        )
+        await upd.message.reply_photo(photo=LOGO, caption=text,
+                                      parse_mode="Markdown", reply_markup=main_kb())
     except Exception:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb())
-
+        await upd.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb())
     return MENU
 
 
-async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
+async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data.clear()
+    await upd.message.reply_text("❌ Скасовано.", reply_markup=ReplyKeyboardRemove())
+    await upd.message.reply_text("🏠 Головне меню:", reply_markup=main_kb())
+    return MENU
+
+
+# ══════════════════════════════════════════════════════════
+#  ГОЛОВНЕ МЕНЮ
+# ══════════════════════════════════════════════════════════
+
+async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = upd.callback_query
     await q.answer()
     d = q.data
 
     if d == "home":
         try: await q.edit_message_reply_markup(reply_markup=None)
         except: pass
-        await context.bot.send_message(update.effective_chat.id, "🏠 Головне меню:", reply_markup=main_kb())
+        await ctx.bot.send_message(upd.effective_chat.id, "🏠 Головне меню:", reply_markup=main_kb())
         return MENU
 
     if d == "about":
-        await q.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(update.effective_chat.id,
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(upd.effective_chat.id,
             "🏢 *ОЦІНКА24*\n\n"
             "✅ Сертифіковані оцінювачі (ЗУ «Про оцінку майна»)\n"
             "✅ Досвід роботи понад 10 років\n"
-            "✅ Оцінка по всій Україні\n"
-            "✅ Звіти для банків, нотаріусів, судів",
+            "✅ Оцінка нерухомості, авто, бізнесу, збитків\n"
+            "✅ Звіти для банків, нотаріусів, судів\n"
+            "✅ Відповідність МСО та НСО України",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📞 Контакти", callback_data="contact")],
+                [InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
                 [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
             ]))
         return MENU
 
     if d == "contact":
-        await q.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(update.effective_chat.id,
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(upd.effective_chat.id,
             f"📞 *Контакти ОЦІНКА24*\n\n"
-            f"☎️ {PHONE1}\n"
-            f"📱 {PHONE2}\n"
-            f"📧 `{EMAIL}`\n"
-            f"🌐 {WEBSITE}\n\n"
-            "🕐 *Графік роботи:*\n"
-            "Пн–Пт: 09:00–18:00\n"
-            "Сб: 09:00–14:00 (за записом)\n"
-            "Нд: вихідний",
+            f"☎️ {PHONE1}\n📱 {PHONE2}\n"
+            f"📧 `{EMAIL}`\n🌐 {WEBSITE}\n\n"
+            "🕐 *Графік:*\nПн–Пт: 09:00–18:00\n"
+            "Сб: 09:00–14:00 (за записом)\nНд: вихідний",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about")],
@@ -289,157 +417,364 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return MENU
 
     if d == "location":
-        await q.edit_message_reply_markup(reply_markup=None)
-        await context.bot.send_message(update.effective_chat.id,
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(upd.effective_chat.id,
             "📍 *Геолокація об'єкта оцінки*\n\n"
-            "Перебуваючи біля об'єкта, натисніть кнопку нижче\nабо введіть адресу текстом.",
+            "Перебуваючи біля об'єкта натисніть кнопку нижче\nабо введіть адресу текстом.",
             parse_mode="Markdown", reply_markup=home_kb())
-        await context.bot.send_message(update.effective_chat.id,
+        await ctx.bot.send_message(upd.effective_chat.id,
             "👇 Надішліть геолокацію:", reply_markup=gps_kb())
         return LOC
 
+    if d == "photogps":
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(upd.effective_chat.id,
+            "📸 *Фото+GPS об'єкта*\n\n"
+            "Надішліть фото об'єкта — бот автоматично:\n"
+            "• Визначить адресу за GPS з фото\n"
+            "• Накладе міні-карту розташування\n"
+            "• Додасть напис *ОЦІНКА24* та координати\n\n"
+            "_Якщо GPS у фото відсутній — спочатку надішліть геолокацію кнопкою нижче._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Головне меню", callback_data="home")]
+            ]))
+        await ctx.bot.send_message(upd.effective_chat.id,
+            "👇 Надішліть фото або геолокацію:",
+            reply_markup=ReplyKeyboardMarkup([
+                [KeyboardButton("📍 Надіслати геолокацію", request_location=True)]
+            ], one_time_keyboard=True, resize_keyboard=True))
+        return PHOTOGPS
+
     if d == "video":
-        await q.answer("Функція відеоогляду в розробці", show_alert=True)
-        return MENU
+        return await start_video(upd, ctx)
 
     if d == "done":
-        return await finish_upload(update, context)
+        return await finish_upload(upd, ctx)
 
-    key = d.replace("obj_", "")
+    key = d.replace("obj_","")
     if key in OBJECTS:
-        return await show_object(update, context, key)
+        return await show_object(upd, ctx, key)
 
     return MENU
 
 
-async def show_object(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str) -> int:
-    icon, name, docs = OBJECTS[key]
-    context.user_data["obj_key"] = key
-    context.user_data["obj_name"] = f"{icon} {name}"
-    context.user_data["files"] = []
+# ══════════════════════════════════════════════════════════
+#  ДОКУМЕНТИ
+# ══════════════════════════════════════════════════════════
 
-    doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
+async def show_object(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> int:
+    icon, name, docs = OBJECTS[key]
+    ctx.user_data.update({"obj_key": key, "obj_name": f"{icon} {name}", "files": []})
+    doc_list = "\n".join(f"  {i+1}. {d}" for i,d in enumerate(docs))
     text = (
         f"{icon} *{name}*\n\n"
         f"📋 *Необхідні документи:*\n{doc_list}\n\n"
         "Надсилайте фото та документи по одному.\n"
-        "Після завершення натисніть «✅ Завершити надсилання»."
+        "Після завершення натисніть *«✅ Завершити»*."
     )
-
-    try:
-        await update.callback_query.edit_message_reply_markup(reply_markup=None)
-    except:
-        pass
-
-    await context.bot.send_message(update.effective_chat.id, text,
-                                   parse_mode="Markdown", reply_markup=upload_kb())
+    try: await upd.callback_query.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    await ctx.bot.send_message(upd.effective_chat.id, text,
+                               parse_mode="Markdown", reply_markup=upload_kb())
     return UPLOAD
 
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = update.message
-    u = msg.from_user
-    obj_name = context.user_data.get("obj_name", "Документ")
-    files = context.user_data.setdefault("files", [])
+async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg  = upd.message
+    u    = msg.from_user
+    name = ctx.user_data.get("obj_name","Документ")
+    files= ctx.user_data.setdefault("files",[])
+    caption = f"{name}\n👤 {u.full_name} | 🆔 `{u.id}`\n📱 @{u.username or '—'}"
 
     if msg.photo:
-        photo_file = await msg.photo[-1].get_file()
-        processed, lat, lon, address = await process_photo_with_geotag(photo_file)
-
-        caption = f"{obj_name}\n👤 {u.full_name} | 🆔 `{u.id}`"
+        # Завантажуємо фото і обробляємо з геотегом
+        await msg.reply_text("⏳ Обробляю фото...")
+        pfile = await msg.photo[-1].get_file()
+        raw   = await pfile.download_as_bytearray()
+        img   = Image.open(BytesIO(bytes(raw))).convert("RGB")
+        lat, lon = _get_exif_gps(img)
+        address  = ""
         if lat and lon:
+            address = await _get_address(lat, lon)
             caption += f"\n📍 `{lat:.6f}, {lon:.6f}`"
-        if address:
-            caption += f"\n📬 {address}"
+            if address: caption += f"\n📬 {address[:80]}"
 
-        await msg.reply_photo(processed, caption="✅ Фото оброблено з водяним знаком та адресою")
-
-        for chat_id in set(ADMIN_IDS + ([CHANNEL_ID] if CHANNEL_ID else [])):
-            if chat_id:
-                await context.bot.send_photo(chat_id, processed, caption=caption, parse_mode="Markdown")
-
+        ts       = datetime.now().strftime("%d.%m.%Y %H:%M")
+        out      = await build_geotagged_photo(bytes(raw), lat, lon, address, ts)
+        await notify_photo(ctx, out, caption)
         files.append(msg.photo[-1].file_id)
 
     elif msg.document:
-        caption = f"{obj_name}\n👤 {u.full_name} | 🆔 `{u.id}`"
-        for chat_id in set(ADMIN_IDS + ([CHANNEL_ID] if CHANNEL_ID else [])):
-            if chat_id:
-                await context.bot.send_document(chat_id, msg.document.file_id, caption=caption, parse_mode="Markdown")
+        await notify_doc(ctx, msg.document.file_id, caption)
         files.append(msg.document.file_id)
+    else:
+        await msg.reply_text("⚠️ Надішліть фото або PDF документа.")
+        return UPLOAD
 
     await msg.reply_text(
         f"✅ Файл прийнято! Всього: *{len(files)}*",
-        parse_mode="Markdown", reply_markup=upload_kb()
-    )
+        parse_mode="Markdown", reply_markup=upload_kb())
     return UPLOAD
 
 
-async def finish_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    u = update.effective_user
-    name = context.user_data.get("obj_name", "—")
-    files = context.user_data.get("files", [])
-
+async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q     = upd.callback_query
+    u     = upd.effective_user
+    name  = ctx.user_data.get("obj_name","—")
+    files = ctx.user_data.get("files",[])
     if not files:
         await q.answer("⚠️ Надішліть хоча б один файл!", show_alert=True)
         return UPLOAD
-
-    summary = (
-        f"📋 *ДОКУМЕНТИ ОТРИМАНО*\n"
-        f"{'─'*30}\n"
-        f"👤 *{u.full_name}*\n"
-        f"🆔 `{u.id}` | @{u.username or '—'}\n"
+    await notify(ctx,
+        f"📋 *ДОКУМЕНТИ ОТРИМАНО*\n{'─'*28}\n"
+        f"👤 *{u.full_name}*\n🆔 `{u.id}` | @{u.username or '—'}\n"
         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"{name}\n"
-        f"Файлів: *{len(files)}*\n\n"
-        f"[Написати клієнту](tg://user?id={u.id})"
-    )
-
-    for chat_id in set(ADMIN_IDS + ([CHANNEL_ID] if CHANNEL_ID else [])):
-        if chat_id:
-            await context.bot.send_message(chat_id, summary, parse_mode="Markdown")
-
-    try:
-        await q.edit_message_reply_markup(reply_markup=None)
-    except:
-        pass
-
-    await context.bot.send_message(update.effective_chat.id,
-        "✅ *Документи успішно надіслано!*\n\nОцінювач зв'яжеться з вами найближчим часом.",
+        f"{name}\nФайлів: *{len(files)}*\n\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})")
+    try: await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    await ctx.bot.send_message(upd.effective_chat.id,
+        "✅ *Документи надіслано!*\n\nОцінювач перевірить і зв'яжеться з вами.",
         parse_mode="Markdown", reply_markup=main_kb())
     return MENU
 
 
 # ══════════════════════════════════════════════════════════
-#  ЗАПУСК БОТА
+#  ГЕОЛОКАЦІЯ
 # ══════════════════════════════════════════════════════════
 
-def main():
-    logger.info("🚀 ОЦІНКА24 Bot v4.3 запущено")
-    logger.info(f"Google Maps API: {'✅ Підключено' if GOOGLE_MAPS_API_KEY else '❌ Не вказано'}")
-    logger.info("IP Geolocation API: ✅ Активний")
+async def handle_location(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    u   = msg.from_user
+    ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+    if msg.location:
+        lat, lon = msg.location.latitude, msg.location.longitude
+        maps = f"https://maps.google.com/?q={lat},{lon}"
+        await notify(ctx,
+            f"📍 *ГЕОЛОКАЦІЯ ОБ'ЄКТА*\n👤 *{u.full_name}* | 🆔 `{u.id}`\n"
+            f"📱 @{u.username or '—'}\n🕐 {ts}\n\n"
+            f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})\n\n"
+            f"[✉️ Написати клієнту](tg://user?id={u.id})")
+        await notify_loc(ctx, lat, lon)
+        await msg.reply_text(
+            f"✅ *Геолокацію зафіксовано!*\n📌 `{lat:.5f}, {lon:.5f}`\n🗺 [Google Maps]({maps})",
+            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    elif msg.text and not msg.text.startswith("/"):
+        await notify(ctx,
+            f"📍 *АДРЕСА ОБ'ЄКТА*\n👤 *{u.full_name}* | 🕐 {ts}\n"
+            f"📬 {msg.text.strip()}\n\n[✉️ Написати клієнту](tg://user?id={u.id})")
+        await msg.reply_text(f"✅ *Адресу зафіксовано!*\n📬 {msg.text.strip()}",
+            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    else:
+        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
+        return LOC
+
+    await ctx.bot.send_message(msg.chat.id,
+        "Дякуємо! Оцінювач отримав місцезнаходження.", reply_markup=main_kb())
+    return MENU
+
+
+# ══════════════════════════════════════════════════════════
+#  ФОТО+GPS
+# ══════════════════════════════════════════════════════════
+
+async def handle_photogps(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    u   = msg.from_user
+    ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Геолокація — зберігаємо для прив'язки до наступного фото
+    if msg.location:
+        ctx.user_data["pgps_lat"] = msg.location.latitude
+        ctx.user_data["pgps_lon"] = msg.location.longitude
+        await msg.reply_text(
+            "✅ GPS збережено!\n\nТепер надішліть фото об'єкта — "
+            "воно отримає водяний знак і міні-карту.",
+            reply_markup=ReplyKeyboardRemove())
+        return PHOTOGPS
+
+    # Фото — обробляємо
+    if msg.photo:
+        await msg.reply_text("⏳ Обробляю фото з геотегом...")
+        pfile = await msg.photo[-1].get_file()
+        raw   = bytes(await pfile.download_as_bytearray())
+        img   = Image.open(BytesIO(raw)).convert("RGB")
+
+        # GPS: спочатку EXIF, потім збережений з попередньої геолокації
+        lat, lon = _get_exif_gps(img)
+        if lat is None:
+            lat = ctx.user_data.get("pgps_lat")
+            lon = ctx.user_data.get("pgps_lon")
+
+        address = ""
+        if lat and lon:
+            address = await _get_address(lat, lon)
+
+        out = await build_geotagged_photo(raw, lat, lon, address, ts)
+
+        # Надсилаємо клієнту
+        out.seek(0)
+        await msg.reply_photo(out,
+            caption="✅ Фото з геотегом ОЦІНКА24")
+
+        # Надсилаємо адміну/каналу
+        caption = (
+            f"📸 *ФОТО+GPS ОБ'ЄКТА*\n"
+            f"👤 *{u.full_name}* | 🆔 `{u.id}`\n"
+            f"📱 @{u.username or '—'}\n🕐 {ts}"
+        )
+        if lat and lon:
+            maps = f"https://maps.google.com/?q={lat},{lon}"
+            caption += f"\n📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})"
+        if address:
+            caption += f"\n📬 {address[:100]}"
+        caption += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
+
+        out.seek(0)
+        await notify_photo(ctx, out, caption)
+        if lat and lon:
+            await notify_loc(ctx, lat, lon)
+
+        # Очищаємо збережений GPS
+        ctx.user_data.pop("pgps_lat", None)
+        ctx.user_data.pop("pgps_lon", None)
+
+        await ctx.bot.send_message(msg.chat.id,
+            "Надішліть ще фото або поверніться в меню:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📸 Ще фото", callback_data="photogps")],
+                [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
+            ]))
+        return PHOTOGPS
+
+    await msg.reply_text("⚠️ Надішліть фото або геолокацію.")
+    return PHOTOGPS
+
+
+# ══════════════════════════════════════════════════════════
+#  ВІДЕООГЛЯД (Jitsi)
+# ══════════════════════════════════════════════════════════
+
+async def start_video(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    u    = upd.effective_user
+    ts   = datetime.now().strftime("%d.%m.%Y %H:%M")
+    room = f"Otsinka24-{uuid.uuid4().hex[:12].upper()}"
+    url  = f"https://meet.jit.si/{room}"
+    ctx.user_data["jitsi"] = url
+
+    await notify(ctx,
+        f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n{'─'*28}\n"
+        f"👤 *{u.full_name}* | 🆔 `{u.id}`\n"
+        f"📱 @{u.username or '—'}\n🕐 {ts}\n\n"
+        f"🔗 Кімната: `{room}`\n"
+        f"[📹 Приєднатися до відеодзвінка]({url})\n\n"
+        f"⚡️ Клієнт підключається!\n"
+        f"[✉️ Написати клієнту](tg://user?id={u.id})")
+
+    try: await upd.callback_query.edit_message_reply_markup(reply_markup=None)
+    except: pass
+
+    await ctx.bot.send_message(upd.effective_chat.id,
+        "📹 *Відеоогляд розпочато!*\nОцінювач отримав сповіщення.",
+        parse_mode="Markdown")
+    await ctx.bot.send_message(upd.effective_chat.id,
+        "📍 Поділіться геолокацією об'єкта:",
+        reply_markup=gps_kb("📍 Надіслати геолокацію об'єкта"))
+    await ctx.bot.send_message(upd.effective_chat.id,
+        "👇 Натисніть щоб увійти у відеодзвінок:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📹 Увійти у відеодзвінок", url=url)
+        ]]))
+    return VIDEOLOC
+
+
+async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg  = upd.message
+    u    = msg.from_user
+    ts   = datetime.now().strftime("%d.%m.%Y %H:%M")
+    jitsi= ctx.user_data.get("jitsi","")
+
+    if msg.location:
+        lat, lon = msg.location.latitude, msg.location.longitude
+        maps = f"https://maps.google.com/?q={lat},{lon}"
+        await notify(ctx,
+            f"📍 *GPS ОБ'ЄКТА (відеоогляд)*\n"
+            f"👤 *{u.full_name}* | 🕐 {ts}\n"
+            f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})")
+        await notify_loc(ctx, lat, lon)
+        await msg.reply_text(
+            f"✅ *GPS зафіксовано!*\n📌 `{lat:.5f}, {lon:.5f}`",
+            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    elif msg.text and not msg.text.startswith("/"):
+        await notify(ctx,
+            f"📍 *АДРЕСА (відеоогляд)*\n"
+            f"👤 {u.full_name} | 🕐 {ts}\n📬 {msg.text.strip()}")
+        await msg.reply_text(f"✅ Адресу зафіксовано!\n📬 {msg.text.strip()}",
+            reply_markup=ReplyKeyboardRemove())
+    else:
+        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
+        return VIDEOLOC
+
+    if jitsi:
+        await ctx.bot.send_message(msg.chat.id, "👇 Увійдіть у відеодзвінок:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)
+            ]]))
+    return MENU
+
+
+# ══════════════════════════════════════════════════════════
+#  ЗБІРКА
+# ══════════════════════════════════════════════════════════
+
+async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Помилка: {ctx.error}", exc_info=ctx.error)
+
+
+def build():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
+    conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
-            MENU: [CallbackQueryHandler(on_menu)],
-            UPLOAD: [
+            MENU:     [CallbackQueryHandler(on_menu)],
+            UPLOAD:   [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
                 CallbackQueryHandler(on_menu),
             ],
-            LOC: [
-                MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, lambda u, c: MENU),
+            LOC:      [
+                MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, handle_location),
                 CallbackQueryHandler(on_menu, pattern="^home$"),
             ],
+            VIDEOLOC: [
+                MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, handle_video_loc),
+                CallbackQueryHandler(on_menu, pattern="^home$"),
+            ],
+            PHOTOGPS: [
+                MessageHandler(filters.PHOTO | filters.LOCATION, handle_photogps),
+                CallbackQueryHandler(on_menu),
+            ],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: MENU)],
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+            CommandHandler("start",  cmd_start),
+        ],
         allow_reentry=True,
     )
+    app.add_handler(conv)
+    app.add_error_handler(err_handler)
+    return app
 
-    app.add_handler(conv_handler)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+def main():
+    logger.info("🚀 ОЦІНКА24 Bot v4.5")
+    logger.info(f"   Адмінів: {len(ADMIN_IDS)}")
+    logger.info(f"   Канал:   {'✅' if CHANNEL_ID else '—'}")
+    logger.info(f"   Google Maps: {'✅' if GMAPS_KEY else '—'}")
+    build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
