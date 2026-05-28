@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ОЦІНКА24 — Telegram Bot v5.0"""
+"""ОЦІНКА24 — Telegram Bot v5.0 | ОЦІНКА24 + великий GPS + номер телефону"""
 
 import asyncio, logging, os, uuid
 from datetime import datetime
@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN  = os.getenv("BOT_TOKEN","")
 ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit()]
 CHANNEL_ID = int(os.getenv("CHANNEL_ID","0"))
-GMAPS_KEY  = os.getenv("GOOGLE_MAPS_API_KEY","")
 
 WEBSITE = "https://ocenka24.com.ua/"
 EMAIL   = "info@ocenka24.com.ua"
@@ -36,14 +35,11 @@ PHONE1  = "0 800 502-977"
 PHONE2  = "+38 (050) 3000-173"
 LOGO    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
-# Telegram username або ID адміна для дзвінка
-CALL_TELEGRAM = f"tg://user?id={ADMIN_IDS[0]}" if ADMIN_IDS else ""
-CALL_PHONE    = f"tel:{PHONE2.replace(' ','').replace('(','').replace(')','').replace('-','')}"
 
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, CALL_MENU, PHONE = range(7)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE = range(6)
 
 # ── Об'єкти оцінки ────────────────────────────────────────
 OBJECTS = {
@@ -86,14 +82,14 @@ OBJECTS = {
 
 def main_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚗 Оцінка транспортного засобу",       callback_data="obj_car")],
+        [InlineKeyboardButton("🚗 Оцінка авто",                       callback_data="obj_car")],
         [InlineKeyboardButton("🏠 Оцінка квартири",                   callback_data="obj_flat")],
-        [InlineKeyboardButton("🏡 Оцінка житлового будинку",          callback_data="obj_house")],
-        [InlineKeyboardButton("🌿 Оцінка земельної ділянки",          callback_data="obj_land")],
-        [InlineKeyboardButton("🏭 Оцінка нежитлової будівлі/споруди", callback_data="obj_nonres")],
-        [InlineKeyboardButton("📹 Онлайн відеоогляд об'єкта оцінки",  callback_data="video")],
-        [InlineKeyboardButton("📍 Геолокація об'єкта оцінки",         callback_data="location")],
-        [InlineKeyboardButton("📸 Фото+GPS об'єкта",                  callback_data="photogps")],
+        [InlineKeyboardButton("🏡 Оцінка будинку",                    callback_data="obj_house")],
+        [InlineKeyboardButton("🌿 Оцінка землі",                      callback_data="obj_land")],
+        [InlineKeyboardButton("🏭 Нежитлова нерухомість",             callback_data="obj_nonres")],
+        [InlineKeyboardButton("📹 Онлайн відеоогляд",                 callback_data="video")],
+        [InlineKeyboardButton("📍 Геолокація",                        callback_data="location")],
+        [InlineKeyboardButton("📸 Фото+GPS",                          callback_data="photogps")],
         [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
          InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
     ])
@@ -112,14 +108,6 @@ def gps_kb(label="📍 Поділитися геолокацією"):
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Головне меню", callback_data="home")]])
 
-def call_kb():
-    """Вибір способу зв'язку."""
-    rows = []
-    if CALL_TELEGRAM:
-        rows.append([InlineKeyboardButton("📱 Дзвінок у Telegram", url=CALL_TELEGRAM)])
-    rows.append([InlineKeyboardButton(f"☎️ Зателефонувати {PHONE2}", url=CALL_PHONE)])
-    rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="home")])
-    return InlineKeyboardMarkup(rows)
 
 
 # ══════════════════════════════════════════════════════════
@@ -281,7 +269,7 @@ async def build_geotagged_photo(
 
     # ── Шрифти (всі великі і читабельні) ─────────────────
     f_brand = _load_font(max(56, W // 16))   # ОЦІНКА24
-    f_gps   = _load_font(max(40, W // 20))   # GPS координати
+    f_gps   = _load_font(max(52, W // 16))   # GPS координати (великий)
     f_addr  = _load_font(max(30, W // 28))   # Адреса
     f_time  = _load_font(max(26, W // 36))   # Дата/час
 
@@ -379,7 +367,6 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                                       parse_mode="Markdown", reply_markup=main_kb())
     except Exception:
         await upd.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb())
-    # Запитуємо номер телефону
     await upd.message.reply_text(
         "📱 *Для зв'язку з вами* вкажіть номер телефону:\n\n"
         "Натисніть кнопку або введіть вручну (+380...)",
@@ -404,25 +391,35 @@ async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 # ══════════════════════════════════════════════════════════
 
 async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримуємо номер телефону клієнта."""
+    """Обробка номера телефону + відправка адмінам."""
     msg = upd.message
+    u   = msg.from_user
+    ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
+
     if msg.contact:
         phone = msg.contact.phone_number
         if not phone.startswith("+"): phone = "+" + phone
     elif msg.text and (msg.text.startswith("+") or msg.text.startswith("0")):
         phone = msg.text.strip()
     else:
-        await msg.reply_text(
-            "⚠️ Введіть номер телефону у форматі +380XXXXXXXXX\nабо натисніть кнопку нижче.",
-            parse_mode="Markdown")
+        await msg.reply_text("⚠️ Введіть номер у форматі +380XXXXXXXXX")
         return PHONE
 
     ctx.user_data["phone"] = phone
-    u = msg.from_user
     logger.info(f"Телефон клієнта {u.id}: {phone}")
 
+    # Сповіщаємо адміністраторів
+    await notify(ctx,
+        f"📱 *НОВИЙ КЛІЄНТ*\n"
+        f"{'─'*28}\n"
+        f"👤 *{u.full_name}*\n"
+        f"🆔 `{u.id}` | @{u.username or '—'}\n"
+        f"📱 `{phone}`\n"
+        f"🕐 {ts}")
+
     await msg.reply_text(
-        f"✅ Дякуємо, *{u.first_name}*! Номер збережено.\n\n👇 Оберіть дію:",
+        f"✅ Дякуємо, *{u.first_name}*!\nНомер телефону збережено.\n\n"
+        "👇 Оберіть дію:",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
     )
@@ -471,15 +468,6 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 [InlineKeyboardButton("ℹ️ Про компанію",   callback_data="about")],
                 [InlineKeyboardButton("🏠 Головне меню",   callback_data="home")],
             ]))
-        return MENU
-
-    if d == "call":
-        await send(
-            f"📞 *Оберіть спосіб зв'язку:*\n\n"
-            f"📱 *Telegram* — безкоштовно, через застосунок\n"
-            f"☎️ *Телефон* — {PHONE2}\n\n"
-            "_Натисніть потрібну кнопку:_",
-            call_kb())
         return MENU
 
     if d == "location":
@@ -823,10 +811,9 @@ def build():
 
 
 def main():
-    logger.info("🚀 ОЦІНКА24 Bot v5.0")
+    logger.info("🚀 ОЦІНКА24 Bot v5.0 | ОЦІНКА24 + великий GPS")
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)}")
     logger.info(f"   Канал:    {'✅' if CHANNEL_ID else '—'}")
-    logger.info(f"   Дзвінок:  {CALL_PHONE}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
