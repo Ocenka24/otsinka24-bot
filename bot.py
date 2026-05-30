@@ -1014,32 +1014,36 @@ async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if u.id not in ADMIN_IDS:
         await upd.message.reply_text("⛔ Доступ заборонено.")
         return MENU
-    if not DATABASE_URL:
-        await upd.message.reply_text("⚠️ База даних не налаштована.")
-        return MENU
     await _show_admin_home(upd.message, ctx)
     return ADMIN
 
 
 async def _show_admin_home(msg_or_query, ctx):
-    try:
-        conn = await _db_connect()
-        users_cnt  = await conn.fetchval("SELECT COUNT(*) FROM users")
-        active_cnt = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='new'")
-        work_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='in_progress'")
-        done_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='done'")
-        all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
-        await conn.close()
-    except Exception as e:
-        text = f"⚠️ Помилка БД: {e}"
-        if hasattr(msg_or_query, "edit_message_text"):
-            await msg_or_query.edit_message_text(text)
-        else:
-            await msg_or_query.reply_text(text)
-        return
+    db_ok = bool(DATABASE_URL)
+    users_cnt = active_cnt = work_cnt = done_cnt = all_cnt = "—"
+
+    if db_ok:
+        try:
+            conn = await _db_connect()
+            users_cnt  = await conn.fetchval("SELECT COUNT(*) FROM users")
+            active_cnt = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='new'")
+            work_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='in_progress'")
+            done_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='done'")
+            all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
+            await conn.close()
+            db_ok = True
+        except Exception as e:
+            logger.warning(f"Admin home DB error: {e}")
+            db_ok = False
+
+    db_status = "✅ підключена" if db_ok else "⚠️ не налаштована"
+    gmaps_status = "✅ активний" if gmaps else "⚠️ не налаштований"
 
     text = (
         "🔐 *Адмін-панель ОЦІНКА24*\n"
+        f"{'─' * 28}\n"
+        f"🗄 БД: {db_status}\n"
+        f"🗺 Google Maps: {gmaps_status}\n"
         f"{'─' * 28}\n"
         f"👥 Клієнтів: *{users_cnt}*\n"
         f"📋 Нових заявок: *{active_cnt}*\n"
@@ -1047,12 +1051,15 @@ async def _show_admin_home(msg_or_query, ctx):
         f"✅ Виконано: *{done_cnt}*\n"
         f"📊 Всього: *{all_cnt}*"
     )
+
+    kb = admin_main_kb() if DATABASE_URL else InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
+    ])
+
     if hasattr(msg_or_query, "edit_message_text"):
-        await msg_or_query.edit_message_text(text, parse_mode="Markdown",
-                                              reply_markup=admin_main_kb())
+        await msg_or_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
-        await msg_or_query.reply_text(text, parse_mode="Markdown",
-                                       reply_markup=admin_main_kb())
+        await msg_or_query.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
 
 async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
