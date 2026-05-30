@@ -600,42 +600,37 @@ def _start_kb() -> InlineKeyboardMarkup:
 
 
 async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data.clear()
     u = upd.effective_user
     name = u.first_name or "Друже"
 
-    text = (
-        f"👋 Вітаємо, {name}!\n\n"
-        "🏢 ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
-        "✅ Сертифіковані оцінювачі\n"
-        "✅ Досвід понад 10 років\n"
-        "✅ Звіти для банків, нотаріусів, судів\n\n"
-        f"📞 {PHONE1}\n"
-        f"📱 {PHONE2}\n"
-        f"🌐 {WEBSITE}"
-    )
-    kb = _start_kb()
+    has_phone = bool(ctx.user_data.get("phone"))
 
-    sent = False
-    try:
-        await upd.message.reply_photo(photo=LOGO, caption=text, reply_markup=kb)
-        sent = True
-    except Exception as e:
-        logger.warning(f"reply_photo failed: {e}")
+    if has_phone:
+        text = f"👋 З поверненням, {name}!\n\nОберіть тип оцінки:"
+        kb   = main_kb()
+    else:
+        text = (
+            f"👋 Вітаємо, {name}!\n\n"
+            "🏢 ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
+            "✅ Сертифіковані оцінювачі\n"
+            "✅ Досвід понад 10 років\n"
+            "✅ Звіти для банків, нотаріусів, судів\n\n"
+            f"📞 {PHONE1}\n"
+            f"📱 {PHONE2}\n"
+            f"🌐 {WEBSITE}"
+        )
+        kb = _start_kb()
 
-    if not sent:
+    for attempt in (
+        lambda: upd.message.reply_photo(photo=LOGO, caption=text, reply_markup=kb),
+        lambda: upd.message.reply_text(text, reply_markup=kb),
+        lambda: upd.message.reply_text("👋 Вітаємо! ОЦІНКА24 — оцінка майна по всій Україні."),
+    ):
         try:
-            await upd.message.reply_text(text, reply_markup=kb)
-            sent = True
+            await attempt()
+            break
         except Exception as e:
-            logger.warning(f"reply_text failed: {e}")
-
-    if not sent:
-        # абсолютний фолбек — просто текст без клавіатури
-        try:
-            await upd.message.reply_text("👋 Вітаємо! Бот ОЦІНКА24 готовий до роботи.")
-        except Exception:
-            pass
+            logger.warning(f"cmd_start send attempt failed: {e}")
 
     return MENU
 
@@ -1686,13 +1681,13 @@ def build():
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
-            CommandHandler("start",  cmd_start),
             CommandHandler("admin",  admin_panel),
         ],
         allow_reentry=True,
     )
     app.add_handler(conv)
-    # /admin і всі adm|*/st|* колбеки — поза станами розмови
+    # Ці хендлери працюють незалежно від стану розмови
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"))
     app.add_error_handler(err_handler)
