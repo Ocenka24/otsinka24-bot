@@ -46,11 +46,13 @@ if _gmaps_available and GOOGLE_MAPS_API_KEY:
     except Exception as _e:
         logging.warning(f"Google Maps Client init failed: {_e} — геокодування через Nominatim")
 
-WEBSITE = "https://ocenka24.com.ua/"
-EMAIL   = "info@ocenka24.com.ua"
-PHONE1  = "0 800 502-977"
-PHONE2  = "+38 (050) 3000-173"
-LOGO    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
+WEBSITE     = "https://ocenka24.com.ua/"
+EMAIL       = "info@ocenka24.com.ua"
+PHONE1      = "0 800 502-977"
+PHONE2      = "+38 (050) 3000-173"
+PHONE2_RAW  = "+380503000173"   # для посилань tel:
+MANAGER_TG  = os.getenv("MANAGER_TG", "")   # @username менеджера (без @)
+LOGO        = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
@@ -572,34 +574,47 @@ async def build_geotagged_photo(
 #  /start  та  /cancel
 # ══════════════════════════════════════════════════════════
 
+def _start_kb() -> InlineKeyboardMarkup:
+    """Стартова клавіатура — до надання телефону."""
+    rows = [
+        [InlineKeyboardButton("📋 Замовити оцінку",       callback_data="pre_order")],
+        [InlineKeyboardButton("ℹ️ Умови та вартість",     callback_data="pre_info")],
+        [InlineKeyboardButton("💬 Написати менеджеру",    callback_data="pre_write")],
+    ]
+    # Кнопка дзвінка в Telegram (якщо є username менеджера)
+    call_row = []
+    if MANAGER_TG:
+        call_row.append(InlineKeyboardButton(
+            "📲 Telegram дзвінок", url=f"tg://resolve?domain={MANAGER_TG}"))
+    call_row.append(InlineKeyboardButton(
+        "📞 Зателефонувати", url=f"tel:{PHONE2_RAW}"))
+    rows.insert(2, call_row)
+    rows.append([InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
+                 InlineKeyboardButton("📞 Контакти",     callback_data="contact")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data.clear()
     u = upd.effective_user
     text = (
         f"👋 Вітаємо, *{u.first_name}*!\n\n"
         "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
-        "Для проведення оцінки оберіть тип об'єкта і надішліть "
-        "документи або проведіть онлайн відеоогляд.\n\n"
+        "✅ Сертифіковані оцінювачі\n"
+        "✅ Досвід понад 10 років\n"
+        "✅ Звіти для банків, нотаріусів, судів\n\n"
         f"☎️ {PHONE1}\n"
         f"📱 {PHONE2}\n"
-        f"📧 {EMAIL}\n"
         f"🌐 {WEBSITE}"
     )
     try:
         await upd.message.reply_photo(photo=LOGO, caption=text,
-                                      parse_mode="Markdown", reply_markup=main_kb())
+                                      parse_mode="Markdown",
+                                      reply_markup=_start_kb())
     except Exception:
-        await upd.message.reply_text(text, parse_mode="Markdown", reply_markup=main_kb())
-    await upd.message.reply_text(
-        "📱 *Для зв'язку з вами* вкажіть номер телефону:\n\n"
-        "Натисніть кнопку або введіть вручну (+380...)",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
-            one_time_keyboard=True, resize_keyboard=True
-        )
-    )
-    return PHONE
+        await upd.message.reply_text(text, parse_mode="Markdown",
+                                     reply_markup=_start_kb())
+    return MENU
 
 
 async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -643,11 +658,25 @@ async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         f"🕐 {ts}")
 
     await msg.reply_text(
-        f"✅ Дякуємо, *{u.first_name}*!\nНомер телефону збережено.\n\n"
-        "👇 Оберіть дію:",
+        f"✅ Дякуємо, *{u.first_name}*! Номер збережено.",
         parse_mode="Markdown",
-        reply_markup=ReplyKeyboardRemove()
-    )
+        reply_markup=ReplyKeyboardRemove())
+
+    # Якщо клієнт вибирав об'єкт до надання телефону — відкриваємо його одразу
+    pending = ctx.user_data.pop("pending_obj", None)
+    if pending and pending in OBJECTS:
+        icon, name, docs = OBJECTS[pending]
+        ctx.user_data.update({"obj_key": pending, "obj_name": f"{icon} {name}", "files": []})
+        doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
+        await ctx.bot.send_message(
+            upd.effective_chat.id,
+            f"{icon} *{name}*\n\n"
+            f"📋 *Необхідні документи:*\n{doc_list}\n\n"
+            "Надсилайте фото та документи по одному.\n"
+            "Після завершення натисніть *«✅ Завершити надсилання документів»*.",
+            parse_mode="Markdown", reply_markup=object_kb())
+        return UPLOAD
+
     await ctx.bot.send_message(upd.effective_chat.id,
         "🏠 Головне меню:", reply_markup=main_kb())
     return MENU
@@ -665,7 +694,76 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await ctx.bot.send_message(upd.effective_chat.id, text, reply_markup=kb, **kw)
 
     if d == "home":
-        await send("🏠 Головне меню:", main_kb())
+        # Якщо телефон вже є — головне меню, інакше стартовий екран
+        if ctx.user_data.get("phone"):
+            await send("🏠 Головне меню:", main_kb())
+        else:
+            await send(
+                f"🏢 *ОЦІНКА24*\n\n☎️ {PHONE1}\n📱 {PHONE2}\n🌐 {WEBSITE}",
+                _start_kb())
+        return MENU
+
+    # ── Стартовий екран — дії без телефону ───────────────
+    if d == "pre_order":
+        # Вимагаємо телефон перед замовленням
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(
+            upd.effective_chat.id,
+            "📱 *Для оформлення замовлення* вкажіть номер телефону.\n\n"
+            "Натисніть кнопку або введіть вручну (+380...):",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
+                one_time_keyboard=True, resize_keyboard=True))
+        return PHONE
+
+    if d == "pre_info":
+        await send(
+            "📋 *Умови та вартість оцінки*\n\n"
+            "🚗 *Оцінка авто* — від 500 грн, термін 1 день\n"
+            "🏠 *Оцінка квартири* — від 700 грн, термін 1–2 дні\n"
+            "🏡 *Оцінка будинку* — від 1200 грн, термін 2–3 дні\n"
+            "🌿 *Оцінка землі* — від 800 грн, термін 2–3 дні\n"
+            "🏭 *Нежитлова нерухомість* — від 1500 грн, за домовленістю\n\n"
+            "📦 Звіт надсилається Новою Поштою або електронно\n"
+            "🎯 Оцінка для банку, нотаріуса, суду, страховки\n\n"
+            f"📞 Уточнити вартість: {PHONE2}\n"
+            f"🌐 {WEBSITE}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
+                [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
+            ]))
+        return MENU
+
+    if d == "pre_write":
+        u2 = upd.effective_user
+        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+        # Надсилаємо запит адміну
+        for tid in ADMIN_IDS:
+            try:
+                await ctx.bot.send_message(
+                    tid,
+                    f"💬 *ЗАПИТ НА ЗВ'ЯЗОК*\n{'─'*24}\n"
+                    f"👤 *{u2.full_name}*\n"
+                    f"🆔 `{u2.id}` | @{u2.username or '—'}\n"
+                    f"🕐 {ts}\n\n"
+                    f"[✉️ Написати](tg://user?id={u2.id})",
+                    parse_mode="Markdown")
+            except Exception:
+                pass
+        manager_link = f"[менеджеру](tg://resolve?domain={MANAGER_TG})" if MANAGER_TG else "менеджеру"
+        await send(
+            f"✅ Ваш запит надіслано!\n\n"
+            f"Менеджер зв'яжеться з вами найближчим часом.\n\n"
+            f"Також можете написати {manager_link} або зателефонувати:\n"
+            f"📞 {PHONE2}",
+            InlineKeyboardMarkup([
+                *([[InlineKeyboardButton("💬 Написати в Telegram",
+                    url=f"tg://resolve?domain={MANAGER_TG}")]] if MANAGER_TG else []),
+                [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
+                [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
+            ]))
         return MENU
 
     if d == "about":
@@ -726,8 +824,22 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if d == "done":
         return await finish_upload(upd, ctx)
 
-    key = d.replace("obj_","")
+    key = d.replace("obj_", "")
     if key in OBJECTS:
+        # Вимагаємо телефон якщо ще не надано
+        if not ctx.user_data.get("phone"):
+            try: await q.edit_message_reply_markup(reply_markup=None)
+            except: pass
+            await ctx.bot.send_message(
+                upd.effective_chat.id,
+                "📱 *Для замовлення оцінки* необхідно вказати номер телефону.\n\n"
+                "Натисніть кнопку або введіть вручну (+380...):",
+                parse_mode="Markdown",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
+                    one_time_keyboard=True, resize_keyboard=True))
+            ctx.user_data["pending_obj"] = key
+            return PHONE
         return await show_object(upd, ctx, key)
 
     return MENU
