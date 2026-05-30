@@ -448,64 +448,55 @@ async def build_geotagged_photo(
     ts: str = "",
 ) -> BytesIO:
     """
-    Накладає на фото великим читабельним текстом (кирилиця):
-      • Карта розташування (ліворуч, ~45% ширини)
-      • Темна панель знизу:
-          - Координати GPS (великий білий текст)
-          - Адреса (великий блакитний, перенос рядків)
-          - Дата/час і сайт (менший зелений)
+    Накладає на фото:
+      • Карта розташування (ліворуч вгорі, ~40% ширини)
+      • Темна панель знизу: координати GPS + адреса
       • ОЦІНКА24 (золотий, правий верхній кут)
+      Дата/час НЕ відображається.
+      Шрифти зменшені на 40% відносно попередньої версії.
     """
     img = Image.open(BytesIO(photo_bytes))
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGBA")
     W, H = img.size
 
-    pad = max(20, W // 50)
+    pad = max(12, W // 60)
 
-    # ── Шрифти — великі, читабельні, з кирилицею ─────────
-    f_brand = _load_font(max(64, W // 14))    # ОЦІНКА24
-    f_label = _load_font(max(38, W // 22))    # підписи "КООРДИНАТИ:" "АДРЕСА:"
-    f_gps   = _load_font(max(52, W // 17))    # координати
-    f_addr  = _load_font(max(44, W // 19))    # адреса
-    f_time  = _load_font(max(32, W // 30))    # дата і сайт
+    # ── Шрифти — зменшені на 40% ─────────────────────────
+    f_brand = _load_font(max(38, int(W / 14 * 0.6)))
+    f_label = _load_font(max(22, int(W / 22 * 0.6)))
+    f_gps   = _load_font(max(30, int(W / 17 * 0.6)))
+    f_addr  = _load_font(max(26, int(W / 19 * 0.6)))
+    f_site  = _load_font(max(18, int(W / 36 * 0.6)))
 
     tmp_draw = ImageDraw.Draw(img)
 
-    # ── Завантажуємо карту ────────────────────────────────
+    # ── Карта ─────────────────────────────────────────────
     map_img = None
-    map_px = min(int(W * 0.44), 520)
+    map_px = min(int(W * 0.38), 400)
     if lat and lon:
         map_img = await _get_map(lat, lon, map_px)
 
-    # ── Розраховуємо висоту нижньої панелі ───────────────
-    lh_label = _text_h(tmp_draw, "К", f_label) + 6
-    lh_gps   = _text_h(tmp_draw, "0", f_gps)   + 12
-    lh_addr  = _text_h(tmp_draw, "А", f_addr)  + 10
-    lh_time  = _text_h(tmp_draw, "0", f_time)  + 8
+    # ── Висота нижньої панелі ─────────────────────────────
+    lh_label = _text_h(tmp_draw, "К", f_label) + 4
+    lh_gps   = _text_h(tmp_draw, "0", f_gps)   + 8
+    lh_addr  = _text_h(tmp_draw, "А", f_addr)  + 6
+    lh_site  = _text_h(tmp_draw, "0", f_site)  + 4
 
-    # Ширина тексту в панелі (без карти якщо є)
-    text_x = pad
     text_max_w = W - pad * 2
-
-    addr_display = address if address else "Адресу не визначено"
-    addr_lines = _wrap_text(tmp_draw, addr_display, f_addr, text_max_w)
+    addr_display = address if address else ""
+    addr_lines = _wrap_text(tmp_draw, addr_display, f_addr, text_max_w) if addr_display else []
 
     panel_h = (pad
-               + lh_label + lh_gps          # GPS-блок
-               + pad // 2
-               + lh_label + lh_addr * len(addr_lines)  # адреса-блок
-               + pad // 2
-               + lh_time                    # дата/сайт
-               + pad)
+               + lh_label + lh_gps + pad // 2
+               + (lh_label + lh_addr * len(addr_lines) + pad // 2 if addr_lines else 0)
+               + lh_site + pad)
 
     # ── Напівпрозора панель знизу ─────────────────────────
     panel_top = H - panel_h
-    overlay = Image.new("RGBA", (W, panel_h), (8, 12, 35, 225))
+    overlay = Image.new("RGBA", (W, panel_h), (8, 12, 35, 220))
     img.paste(overlay, (0, panel_top), overlay)
-
-    # Золота лінія-роздільник зверху панелі
-    sep = Image.new("RGBA", (W, 5), (255, 215, 0, 220))
+    sep = Image.new("RGBA", (W, 4), (255, 215, 0, 210))
     img.paste(sep, (0, panel_top), sep)
 
     draw = ImageDraw.Draw(img)
@@ -514,58 +505,47 @@ async def build_geotagged_photo(
     brand = "ОЦІНКА24"
     bw = _text_w(draw, brand, f_brand)
     _draw_text_shadow(draw, (W - bw - pad, pad), brand, f_brand,
-                      fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=4)
+                      fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=3)
 
-    # ── Карта — лівий верхній кут ─────────────────────────
+    # ── Карта — лівий верхній кут (під написом бренду) ───
+    brand_h = _text_h(draw, brand, f_brand)
     if map_img:
         mw, mh = map_img.size
-        border = 6
-        # золота рамка
+        border = 5
         frame = Image.new("RGBA", (mw + border * 2, mh + border * 2), (255, 215, 0, 255))
         frame.paste(map_img, (border, border))
-        img.paste(frame, (pad, pad + _text_h(draw, brand, f_brand) + pad))
-
-        # підпис "КАРТА МІСЦЯ"
-        cap_y = pad + _text_h(draw, brand, f_brand) + pad + mh + border * 2 + 6
-        if cap_y + lh_time < panel_top:
-            _draw_text_shadow(draw, (pad, cap_y), "КАРТА МІСЦЯ", f_time,
-                              fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200))
+        map_y = pad + brand_h + pad
+        if map_y + mh + border * 2 < panel_top - pad:
+            img.paste(frame, (pad, map_y))
 
     # ── Вміст панелі ──────────────────────────────────────
+    tx = pad
     y = panel_top + pad
 
-    # GPS координати
-    _draw_text_shadow(draw, (text_x, y), "КООРДИНАТИ:", f_label,
-                      fill=(255, 215, 0, 200), shadow=(0, 0, 0, 150))
+    # Координати
+    _draw_text_shadow(draw, (tx, y), "КООРДИНАТИ:", f_label,
+                      fill=(255, 215, 0, 190), shadow=(0, 0, 0, 140))
     y += lh_label
-
-    if lat and lon:
-        gps_text = f"{lat:.6f},  {lon:.6f}"
-    else:
-        gps_text = "GPS не визначено"
-    _draw_text_shadow(draw, (text_x, y), gps_text, f_gps,
-                      fill=(255, 255, 255, 255), shadow=(0, 0, 0, 220), offset=3)
+    gps_text = f"{lat:.6f},  {lon:.6f}" if (lat and lon) else "—"
+    _draw_text_shadow(draw, (tx, y), gps_text, f_gps,
+                      fill=(255, 255, 255, 255), shadow=(0, 0, 0, 200), offset=2)
     y += lh_gps + pad // 2
 
     # Адреса
-    _draw_text_shadow(draw, (text_x, y), "АДРЕСА:", f_label,
-                      fill=(255, 215, 0, 200), shadow=(0, 0, 0, 150))
-    y += lh_label
+    if addr_lines:
+        _draw_text_shadow(draw, (tx, y), "АДРЕСА:", f_label,
+                          fill=(255, 215, 0, 190), shadow=(0, 0, 0, 140))
+        y += lh_label
+        for line in addr_lines:
+            _draw_text_shadow(draw, (tx, y), line, f_addr,
+                              fill=(160, 220, 255, 255), shadow=(0, 0, 0, 200), offset=2)
+            y += lh_addr
+        y += pad // 2
 
-    for line in addr_lines:
-        _draw_text_shadow(draw, (text_x, y), line, f_addr,
-                          fill=(160, 220, 255, 255), shadow=(0, 0, 0, 220), offset=3)
-        y += lh_addr
-
-    y += pad // 2
-
-    # Дата — зліва
-    _draw_text_shadow(draw, (text_x, y), ts, f_time,
-                      fill=(140, 255, 140, 255), shadow=(0, 0, 0, 180))
-    # Сайт — справа
-    site_w = _text_w(draw, WEBSITE, f_time)
-    _draw_text_shadow(draw, (W - site_w - pad, y), WEBSITE, f_time,
-                      fill=(180, 180, 255, 255), shadow=(0, 0, 0, 180))
+    # Сайт — справа внизу панелі
+    site_w = _text_w(draw, WEBSITE, f_site)
+    _draw_text_shadow(draw, (W - site_w - pad, y), WEBSITE, f_site,
+                      fill=(180, 180, 255, 200), shadow=(0, 0, 0, 150))
 
     # ── Зберігаємо ────────────────────────────────────────
     out = BytesIO()
@@ -936,7 +916,6 @@ async def _process_and_send_photo(msg, u, ctx, photo_bytes: bytes,
 
     processed.seek(0)
     await notify_photo(ctx, processed, caption)
-    await notify_loc(ctx, lat, lon)
 
     ctx.user_data.pop("pgps_lat", None)
     ctx.user_data.pop("pgps_lon", None)
@@ -1383,6 +1362,9 @@ def build():
         allow_reentry=True,
     )
     app.add_handler(conv)
+    # /admin і всі adm|*/st|* колбеки — поза станами розмови
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"))
     app.add_error_handler(err_handler)
     return app
 
