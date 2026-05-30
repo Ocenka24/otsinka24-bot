@@ -1382,6 +1382,9 @@ def build():
         ],
         allow_reentry=True,
     )
+    app.add_handler(conv)
+    app.add_error_handler(err_handler)
+    return app
 
 
 def main():
