@@ -55,7 +55,7 @@ LOGO    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN, COMMENT = range(8)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN, COMMENT, DELIVERY = range(9)
 
 # ══════════════════════════════════════════════════════════
 # ІНІЦІАЛІЗАЦІЯ БАЗИ
@@ -152,23 +152,27 @@ OBJECTS = {
 
 def main_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚗 Оцінка авто",                       callback_data="obj_car")],
-        [InlineKeyboardButton("🏠 Оцінка квартири",                   callback_data="obj_flat")],
-        [InlineKeyboardButton("🏡 Оцінка будинку",                    callback_data="obj_house")],
-        [InlineKeyboardButton("🌿 Оцінка землі",                      callback_data="obj_land")],
-        [InlineKeyboardButton("🏭 Нежитлова нерухомість",             callback_data="obj_nonres")],
-        [InlineKeyboardButton("📹 Онлайн відеоогляд",                 callback_data="video")],
-        [InlineKeyboardButton("📍 Геолокація",                        callback_data="location")],
-        [InlineKeyboardButton("📸 Фото+GPS",                          callback_data="photogps")],
+        [InlineKeyboardButton("🚗 Оцінка авто",          callback_data="obj_car")],
+        [InlineKeyboardButton("🏠 Оцінка квартири",      callback_data="obj_flat")],
+        [InlineKeyboardButton("🏡 Оцінка будинку",       callback_data="obj_house")],
+        [InlineKeyboardButton("🌿 Оцінка землі",         callback_data="obj_land")],
+        [InlineKeyboardButton("🏭 Нежитлова нерухомість",callback_data="obj_nonres")],
+        [InlineKeyboardButton("📍 Геолокація",           callback_data="location")],
         [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
          InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
     ])
 
-def upload_kb():
+def object_kb():
+    """Клавіатура всередині заявки на оцінку."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Завершити надсилання", callback_data="done")],
-        [InlineKeyboardButton("🏠 Головне меню",         callback_data="home")],
+        [InlineKeyboardButton("📸 Фото з GPS",            callback_data="obj_photogps")],
+        [InlineKeyboardButton("📹 Відеоогляд",            callback_data="obj_video")],
+        [InlineKeyboardButton("✅ Завершити надсилання документів", callback_data="done")],
+        [InlineKeyboardButton("🏠 Головне меню",          callback_data="home")],
     ])
+
+def upload_kb():
+    return object_kb()
 
 def gps_kb(label="📍 Поділитися геолокацією"):
     return ReplyKeyboardMarkup(
@@ -469,14 +473,15 @@ async def build_geotagged_photo(
     img = img.convert("RGBA")
     W, H = img.size
 
-    pad = max(12, W // 60)
+    # Розміри шрифтів ~10% від розміру фото
+    base = max(int(H * 0.025), 10)   # ~2.5% висоти = базовий розмір
+    pad  = max(6, base // 3)
 
-    # ── Шрифти — зменшені на 40% ─────────────────────────
-    f_brand = _load_font(max(38, int(W / 14 * 0.6)))
-    f_label = _load_font(max(22, int(W / 22 * 0.6)))
-    f_gps   = _load_font(max(30, int(W / 17 * 0.6)))
-    f_addr  = _load_font(max(26, int(W / 19 * 0.6)))
-    f_site  = _load_font(max(18, int(W / 36 * 0.6)))
+    f_brand = _load_font(base * 2)
+    f_label = _load_font(int(base * 1.2))
+    f_gps   = _load_font(int(base * 1.6))
+    f_addr  = _load_font(int(base * 1.4))
+    f_site  = _load_font(base)
 
     tmp_draw = ImageDraw.Draw(img)
 
@@ -699,24 +704,23 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             "👇 Надішліть геолокацію:", reply_markup=gps_kb())
         return LOC
 
-    if d == "photogps":
-        await send(
-            "📸 *Фото+GPS об'єкта*\n\n"
-            "Надішліть фото об'єкта — бот автоматично:\n"
-            "• Визначить адресу за GPS\n"
-            "• Накладе міні-карту розташування\n"
-            "• Додасть напис *ОЦІНКА24*, координати і дату\n\n"
-            "💡 Якщо GPS у фото відсутній — спочатку надішліть "
-            "геолокацію кнопкою нижче.",
-            home_kb())
-        await ctx.bot.send_message(upd.effective_chat.id,
-            "👇 Надішліть фото або геолокацію:",
+    if d in ("photogps", "obj_photogps"):
+        try: await q.edit_message_reply_markup(reply_markup=None)
+        except: pass
+        await ctx.bot.send_message(
+            upd.effective_chat.id,
+            "📸 *Фото з GPS*\n\n"
+            "Надішліть фото або спочатку поділіться геолокацією.",
+            parse_mode="Markdown")
+        await ctx.bot.send_message(
+            upd.effective_chat.id,
+            "📍 НАДІСЛАТИ ГЕОЛОКАЦІЮ ОБ'ЄКТА",
             reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton("📍 Надіслати геолокацію об'єкта", request_location=True)]],
+                [[KeyboardButton("📍 НАДІСЛАТИ ГЕОЛОКАЦІЮ ОБ'ЄКТА", request_location=True)]],
                 one_time_keyboard=True, resize_keyboard=True))
         return PHOTOGPS
 
-    if d == "video":
+    if d in ("video", "obj_video"):
         return await start_video(upd, ctx)
 
     if d == "done":
@@ -735,18 +739,19 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def show_object(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> int:
     icon, name, docs = OBJECTS[key]
-    ctx.user_data.update({"obj_key":key, "obj_name":f"{icon} {name}", "files":[]})
-    doc_list = "\n".join(f"  {i+1}. {d}" for i,d in enumerate(docs))
+    ctx.user_data.update({"obj_key": key, "obj_name": f"{icon} {name}", "files": []})
+    doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
     text = (
         f"{icon} *{name}*\n\n"
         f"📋 *Необхідні документи:*\n{doc_list}\n\n"
         "Надсилайте фото та документи по одному.\n"
-        "Після завершення натисніть *«✅ Завершити»*."
+        "Ви також можете додати *фото з GPS* або провести *відеоогляд*.\n"
+        "Після завершення натисніть *«✅ Завершити надсилання документів»*."
     )
     try: await upd.callback_query.edit_message_reply_markup(reply_markup=None)
     except: pass
     await ctx.bot.send_message(upd.effective_chat.id, text,
-                               parse_mode="Markdown", reply_markup=upload_kb())
+                               parse_mode="Markdown", reply_markup=object_kb())
     return UPLOAD
 
 
@@ -809,19 +814,49 @@ async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def handle_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отримує текстовий опис об'єкта і завершує заявку."""
     msg = upd.message
-    comment = msg.text.strip() if msg and msg.text else ""
-    ctx.user_data["comment"] = comment
+    ctx.user_data["comment"] = msg.text.strip() if msg and msg.text else ""
+    return await _ask_delivery(upd, ctx)
+
+
+async def skip_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = upd.callback_query
+    await q.answer()
+    ctx.user_data["comment"] = ""
+    try: await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    return await _ask_delivery(upd, ctx)
+
+
+async def _ask_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Питає дані отримувача звіту (Нова Пошта)."""
+    await ctx.bot.send_message(
+        upd.effective_chat.id,
+        "📦 *Дані для відправлення звіту (Нова Пошта)*\n\n"
+        "Надішліть одним повідомленням:\n"
+        "• Місто та номер відділення НП\n"
+        "• Прізвище та ім'я отримувача\n"
+        "• Номер телефону отримувача\n\n"
+        "_Приклад:_\n"
+        "`Київ, відділення №12\nІваненко Іван\n+380671234567`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Пропустити", callback_data="delivery_skip")],
+        ]))
+    return DELIVERY
+
+
+async def handle_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    ctx.user_data["delivery"] = msg.text.strip() if msg and msg.text else ""
     await _complete_request(upd, ctx)
     return MENU
 
 
-async def skip_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Пропуск опису об'єкта."""
+async def skip_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
     await q.answer()
-    ctx.user_data["comment"] = ""
+    ctx.user_data["delivery"] = ""
     try: await q.edit_message_reply_markup(reply_markup=None)
     except: pass
     await _complete_request(upd, ctx)
@@ -829,36 +864,72 @@ async def skip_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Надсилає фінальне сповіщення адміну і підтверджує клієнту."""
-    u       = upd.effective_user
-    name    = ctx.user_data.get("obj_name", "—")
-    files   = ctx.user_data.get("files", [])
-    comment = ctx.user_data.get("comment", "")
-    phone   = ctx.user_data.get("phone", "—")
-    ts      = datetime.now().strftime("%d.%m.%Y %H:%M")
+    """Зберігає заявку в БД, сповіщає адміна і підтверджує клієнту."""
+    u        = upd.effective_user
+    name     = ctx.user_data.get("obj_name", "—")
+    obj_key  = ctx.user_data.get("obj_key", "")
+    files    = ctx.user_data.get("files", [])
+    comment  = ctx.user_data.get("comment", "")
+    delivery = ctx.user_data.get("delivery", "")
+    phone    = ctx.user_data.get("phone", "—")
+    ts       = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    text = (
-        f"📋 *НОВА ЗАЯВКА*\n{'─'*28}\n"
+    # ── Зберігаємо в БД ──────────────────────────────────
+    req_id = None
+    if DATABASE_URL:
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            # Гарантуємо що користувач є в таблиці users
+            await conn.execute("""
+                INSERT INTO users (user_id, username, full_name, phone)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id) DO UPDATE
+                  SET username=$2, full_name=$3, phone=COALESCE($4, users.phone)
+            """, u.id, u.username, u.full_name, phone if phone != "—" else None)
+
+            full_comment = comment
+            if delivery:
+                full_comment += ("\n\n" if full_comment else "") + f"Нова Пошта: {delivery}"
+            req_id = await conn.fetchval("""
+                INSERT INTO requests (user_id, request_type, status, comment)
+                VALUES ($1, $2, 'new', $3) RETURNING id
+            """, u.id, name, full_comment or None)
+            await conn.close()
+            logger.info(f"Заявку #{req_id} збережено в БД для user {u.id}")
+        except Exception as e:
+            logger.warning(f"DB insert request error: {e}")
+
+    # ── Сповіщення адміну ─────────────────────────────────
+    adm_text = (
+        f"📋 *НОВА ЗАЯВКА #{req_id or '—'}*\n{'─'*28}\n"
         f"👤 *{u.full_name}*\n"
         f"🆔 `{u.id}` | @{u.username or '—'}\n"
         f"📱 {phone}\n"
         f"🕐 {ts}\n\n"
-        f"{name}\n"
+        f"*{name}*\n"
         f"📎 Файлів: *{len(files)}*"
     )
     if comment:
-        text += f"\n\n📝 *Опис об'єкта:*\n{comment}"
-    text += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
+        adm_text += f"\n\n📝 *Опис:* {comment}"
+    if delivery:
+        adm_text += f"\n\n📦 *Нова Пошта:*\n{delivery}"
+    adm_text += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
+    await notify(ctx, adm_text)
 
-    await notify(ctx, text)
-
-    reply_text = "✅ *Заявку надіслано!*\nОцінювач перевірить і зв'яжеться з вами."
-    if comment:
-        reply_text += f"\n\n📝 Ваш опис: _{comment}_"
-
-    chat_id = upd.effective_chat.id
-    await ctx.bot.send_message(chat_id, reply_text,
-                               parse_mode="Markdown", reply_markup=main_kb())
+    # ── Підтвердження клієнту ─────────────────────────────
+    client_text = (
+        f"✅ *Заявку на {name} прийнято в роботу!*\n\n"
+        "Представники компанії *ОЦІНКА24* зв'яжуться з вами найближчим часом.\n\n"
+    )
+    if delivery:
+        client_text += f"📦 *Дані для доставки звіту:*\n_{delivery}_\n\n"
+    client_text += (
+        f"☎️ {PHONE1}\n"
+        f"🌐 {WEBSITE}"
+    )
+    await ctx.bot.send_message(
+        upd.effective_chat.id, client_text,
+        parse_mode="Markdown", reply_markup=main_kb())
 
 
 # ══════════════════════════════════════════════════════════
@@ -1432,6 +1503,10 @@ def build():
             COMMENT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_comment),
                 CallbackQueryHandler(skip_comment, pattern="^comment_skip$"),
+            ],
+            DELIVERY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delivery),
+                CallbackQueryHandler(skip_delivery, pattern="^delivery_skip$"),
             ],
             ADMIN: [
                 CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"),
