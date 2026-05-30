@@ -775,6 +775,14 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return UPLOAD
 
 
+_COMMENT_EXAMPLES = {
+    "car":    "Toyota Camry 2019, 2.5 бензин, пробіг 85 000 км, АКПП, стан добрий",
+    "flat":   "3-кімнатна квартира, 5 поверх із 9, 72 м², після ремонту, є балкон",
+    "house":  "2-поверховий будинок, 120 м², цегла, 2015 р.п., ділянка 8 соток",
+    "land":   "Ділянка 12 соток, призначення — сільськогосподарське, є під'їзд",
+    "nonres": "Офісне приміщення 200 м², 1 поверх, окремий вхід, у центрі міста",
+}
+
 async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q     = upd.callback_query
     files = ctx.user_data.get("files", [])
@@ -783,11 +791,15 @@ async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return UPLOAD
     try: await q.edit_message_reply_markup(reply_markup=None)
     except: pass
+
+    obj_key = ctx.user_data.get("obj_key", "")
+    example = _COMMENT_EXAMPLES.get(obj_key, "стан об'єкта, площа, рік побудови або інші важливі деталі")
+
     await ctx.bot.send_message(
         upd.effective_chat.id,
         "✅ *Файли отримано!*\n\n"
-        "📝 Додайте короткий *опис об'єкта* оцінки\n"
-        "_(наприклад: 3-кімнатна квартира, 2 поверх, 75 м², після ремонту)_\n\n"
+        "📝 Додайте короткий *опис об'єкта* оцінки:\n"
+        f"_(наприклад: {example})_\n\n"
         "Або пропустіть цей крок:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
