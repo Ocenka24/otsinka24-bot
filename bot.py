@@ -73,36 +73,42 @@ async def init_db():
     if not DATABASE_URL:
         logger.warning("DATABASE_URL не задано — БД не ініціалізована")
         return
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            phone TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS requests (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT REFERENCES users(user_id),
-            request_type TEXT NOT NULL,
-            status TEXT DEFAULT 'new',
-            address TEXT,
-            lat DOUBLE PRECISION,
-            lon DOUBLE PRECISION,
-            comment TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS request_files (
-            id SERIAL PRIMARY KEY,
-            request_id INTEGER REFERENCES requests(id),
-            file_id TEXT NOT NULL,
-            file_type TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    ''')
-    await _db_release(conn)
-    logger.info("✅ База даних ініціалізована")
+    conn = None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                phone TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                request_type TEXT NOT NULL,
+                status TEXT DEFAULT 'new',
+                address TEXT,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
+                comment TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS request_files (
+                id SERIAL PRIMARY KEY,
+                request_id INTEGER REFERENCES requests(id),
+                file_id TEXT NOT NULL,
+                file_type TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+        logger.info("✅ База даних ініціалізована")
+    except Exception as e:
+        logger.error(f"init_db error: {e}")
+    finally:
+        if conn:
+            await conn.close()
 
 
 async def _save_user(user_id: int, username: str, full_name: str, phone: str):
@@ -263,8 +269,9 @@ async def notify_loc(ctx, lat, lon):
 #  ФОТО+GPS: ОБРОБКА ЗОБРАЖЕНЬ
 # ══════════════════════════════════════════════════════════
 
-_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+_FONT_CACHE: dict = {}
 _FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_cyr.ttf")
+_LOGO_CACHE: Image.Image | None = None
 
 # Шляхи до шрифтів з підтримкою кирилиці
 _FONT_PATHS = [
@@ -278,6 +285,25 @@ _FONT_PATHS = [
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
     "arial.ttf",
 ]
+
+
+def _load_logo_sync() -> "Image.Image | None":
+    """Завантажує логотип компанії (синхронно, кешується)."""
+    global _LOGO_CACHE
+    if _LOGO_CACHE is not None:
+        return _LOGO_CACHE
+    import urllib.request
+    try:
+        req = urllib.request.Request(LOGO, headers={"User-Agent": "Otsinka24Bot/5.3"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+        img = Image.open(BytesIO(data)).convert("RGBA")
+        _LOGO_CACHE = img
+        logger.info("✅ Логотип завантажено")
+        return img
+    except Exception as e:
+        logger.warning(f"Логотип не завантажено: {e}")
+        return None
 
 
 def _ensure_cyrillic_font_sync():
@@ -528,14 +554,31 @@ async def build_geotagged_photo(
 
     draw = ImageDraw.Draw(img)
 
-    # ── ОЦІНКА24 — правий верхній кут ────────────────────
-    brand = "ОЦІНКА24"
-    bw = _text_w(draw, brand, f_brand)
-    _draw_text_shadow(draw, (W - bw - pad, pad), brand, f_brand,
-                      fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=3)
+    # ── Логотип компанії — правий верхній кут ────────────
+    logo_h = 0
+    logo_src = _load_logo_sync()
+    if logo_src:
+        # Масштабуємо логотип: ~18% ширини фото
+        logo_target_w = max(int(W * 0.18), 80)
+        lw, lh = logo_src.size
+        logo_target_h = int(lh * logo_target_w / lw)
+        logo_resized = logo_src.resize((logo_target_w, logo_target_h), Image.LANCZOS)
 
-    # ── Карта — лівий верхній кут (під написом бренду) ───
-    brand_h = _text_h(draw, brand, f_brand)
+        # Напівпрозорий фон під логотипом
+        bg = Image.new("RGBA", (logo_target_w + pad * 2, logo_target_h + pad * 2), (0, 0, 0, 140))
+        img.paste(bg, (W - logo_target_w - pad * 3, pad // 2), bg)
+        img.paste(logo_resized, (W - logo_target_w - pad * 2, pad), logo_resized)
+        logo_h = logo_target_h + pad * 2
+    else:
+        # Фолбек — текст ОЦІНКА24
+        brand = "ОЦІНКА24"
+        bw = _text_w(draw, brand, f_brand)
+        _draw_text_shadow(draw, (W - bw - pad, pad), brand, f_brand,
+                          fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=3)
+        logo_h = _text_h(draw, "ОЦІНКА24", f_brand) + pad
+
+    # ── Карта — лівий верхній кут (під логотипом) ────────
+    brand_h = logo_h
     if map_img:
         mw, mh = map_img.size
         border = 5
@@ -1025,16 +1068,15 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Зберігаємо в БД ──────────────────────────────────
     req_id = None
     if DATABASE_URL:
+        conn = None
         try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            # Гарантуємо що користувач є в таблиці users
+            conn = await _db_connect()
             await conn.execute("""
                 INSERT INTO users (user_id, username, full_name, phone)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (user_id) DO UPDATE
                   SET username=$2, full_name=$3, phone=COALESCE($4, users.phone)
             """, u.id, u.username, u.full_name, phone if phone != "—" else None)
-
             full_comment = comment
             if delivery:
                 full_comment += ("\n\n" if full_comment else "") + f"Нова Пошта: {delivery}"
@@ -1042,10 +1084,12 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 INSERT INTO requests (user_id, request_type, status, comment)
                 VALUES ($1, $2, 'new', $3) RETURNING id
             """, u.id, name, full_comment or None)
-            await _db_release(conn)
             logger.info(f"Заявку #{req_id} збережено в БД для user {u.id}")
         except Exception as e:
             logger.warning(f"DB insert request error: {e}")
+        finally:
+            if conn:
+                await _db_release(conn)
 
     # ── Сповіщення адміну ─────────────────────────────────
     adm_text = (
@@ -1740,6 +1784,7 @@ def build():
 
 def main():
     _ensure_cyrillic_font_sync()
+    _load_logo_sync()   # кешуємо логотип заздалегідь
     logger.info("🚀 ОЦІНКА24 Bot v5.3 | Google Maps + Адмін-панель + БД")
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)}")
     logger.info(f"   Канал:    {'✅' if CHANNEL_ID else '—'}")
