@@ -598,23 +598,41 @@ def _start_kb() -> InlineKeyboardMarkup:
 async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data.clear()
     u = upd.effective_user
+    name = u.first_name or "Друже"
+
     text = (
-        f"👋 Вітаємо, *{u.first_name}*!\n\n"
-        "🏢 *ОЦІНКА24* — професійна оцінка майна по всій Україні.\n\n"
+        f"👋 Вітаємо, {name}!\n\n"
+        "🏢 ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
         "✅ Сертифіковані оцінювачі\n"
         "✅ Досвід понад 10 років\n"
         "✅ Звіти для банків, нотаріусів, судів\n\n"
-        f"☎️ {PHONE1}\n"
+        f"📞 {PHONE1}\n"
         f"📱 {PHONE2}\n"
         f"🌐 {WEBSITE}"
     )
+    kb = _start_kb()
+
+    sent = False
     try:
-        await upd.message.reply_photo(photo=LOGO, caption=text,
-                                      parse_mode="Markdown",
-                                      reply_markup=_start_kb())
-    except Exception:
-        await upd.message.reply_text(text, parse_mode="Markdown",
-                                     reply_markup=_start_kb())
+        await upd.message.reply_photo(photo=LOGO, caption=text, reply_markup=kb)
+        sent = True
+    except Exception as e:
+        logger.warning(f"reply_photo failed: {e}")
+
+    if not sent:
+        try:
+            await upd.message.reply_text(text, reply_markup=kb)
+            sent = True
+        except Exception as e:
+            logger.warning(f"reply_text failed: {e}")
+
+    if not sent:
+        # абсолютний фолбек — просто текст без клавіатури
+        try:
+            await upd.message.reply_text("👋 Вітаємо! Бот ОЦІНКА24 готовий до роботи.")
+        except Exception:
+            pass
+
     return MENU
 
 
@@ -1580,6 +1598,12 @@ async def _admin_clients(q) -> int:
 
 async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Помилка: {ctx.error}", exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Виникла помилка. Спробуйте /start")
+        except Exception:
+            pass
 
 
 async def _post_init(app):
