@@ -55,7 +55,7 @@ LOGO    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN = range(7)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN, COMMENT = range(8)
 
 # ══════════════════════════════════════════════════════════
 # ІНІЦІАЛІЗАЦІЯ БАЗИ
@@ -370,7 +370,7 @@ def _get_exif_gps(image: Image.Image):
 
 
 async def _get_address(lat: float, lon: float) -> str:
-    """Пріоритет: Google Maps → BigDataCloud → Nominatim."""
+    """Пріоритет: Google Maps → Nominatim → BigDataCloud."""
     import json
 
     # 1. Google Maps
@@ -381,38 +381,47 @@ async def _get_address(lat: float, lon: float) -> str:
                 None, lambda: gmaps.reverse_geocode((lat, lon), language="uk")
             )
             if result:
-                return result[0]["formatted_address"]
-        except Exception as e:
-            logger.warning(f"Google Maps error: {e}")
-
-    # 2. BigDataCloud
-    url = (f"https://api.bigdatacloud.net/data/reverse-geocode-client"
-           f"?latitude={lat}&longitude={lon}&localityLanguage=uk")
-    data = await _fetch_async(url)
-    if data:
-        try:
-            j = json.loads(data)
-            addr = j.get("display_name") or ", ".join(filter(None, [
-                j.get("city", ""), j.get("principalSubdivision", ""), j.get("countryName", "")
-            ]))
-            if addr and addr.strip(", "):
+                addr = result[0]["formatted_address"]
+                logger.info(f"Google Maps address: {addr}")
                 return addr
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Google Maps geocoding error: {e}")
 
-    # 3. Nominatim
+    # 2. Nominatim (найточніший безкоштовний)
     url = (f"https://nominatim.openstreetmap.org/reverse"
-           f"?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18")
+           f"?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18"
+           f"&addressdetails=1")
     data = await _fetch_async(url)
     if data:
         try:
             j = json.loads(data)
             addr = j.get("display_name", "")
             if addr:
+                logger.info(f"Nominatim address: {addr[:80]}")
                 return addr
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Nominatim parse error: {e}")
 
+    # 3. BigDataCloud (запасний)
+    url = (f"https://api.bigdatacloud.net/data/reverse-geocode-client"
+           f"?latitude={lat}&longitude={lon}&localityLanguage=uk")
+    data = await _fetch_async(url)
+    if data:
+        try:
+            j = json.loads(data)
+            parts = filter(None, [
+                j.get("principalSubdivision", ""),
+                j.get("city", "") or j.get("locality", ""),
+                j.get("countryName", ""),
+            ])
+            addr = ", ".join(parts)
+            if addr.strip(", "):
+                logger.info(f"BigDataCloud address: {addr}")
+                return addr
+        except Exception as e:
+            logger.warning(f"BigDataCloud parse error: {e}")
+
+    logger.warning(f"All geocoding failed for {lat},{lon}")
     return ""
 
 
@@ -768,24 +777,76 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q     = upd.callback_query
-    u     = upd.effective_user
-    name  = ctx.user_data.get("obj_name","—")
-    files = ctx.user_data.get("files",[])
+    files = ctx.user_data.get("files", [])
     if not files:
         await q.answer("⚠️ Надішліть хоча б один файл!", show_alert=True)
         return UPLOAD
-    await notify(ctx,
-        f"📋 *ДОКУМЕНТИ ОТРИМАНО*\n{'─'*28}\n"
-        f"👤 *{u.full_name}*\n🆔 `{u.id}` | @{u.username or '—'}\n"
-        f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"{name}\nФайлів: *{len(files)}*\n\n"
-        f"[✉️ Написати клієнту](tg://user?id={u.id})")
     try: await q.edit_message_reply_markup(reply_markup=None)
     except: pass
-    await ctx.bot.send_message(upd.effective_chat.id,
-        "✅ *Документи надіслано!*\nОцінювач перевірить і зв'яжеться з вами.",
-        parse_mode="Markdown", reply_markup=main_kb())
+    await ctx.bot.send_message(
+        upd.effective_chat.id,
+        "✅ *Файли отримано!*\n\n"
+        "📝 Додайте короткий *опис об'єкта* оцінки\n"
+        "_(наприклад: 3-кімнатна квартира, 2 поверх, 75 м², після ремонту)_\n\n"
+        "Або пропустіть цей крок:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭ Пропустити опис", callback_data="comment_skip")],
+        ]))
+    return COMMENT
+
+
+async def handle_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отримує текстовий опис об'єкта і завершує заявку."""
+    msg = upd.message
+    comment = msg.text.strip() if msg and msg.text else ""
+    ctx.user_data["comment"] = comment
+    await _complete_request(upd, ctx)
     return MENU
+
+
+async def skip_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Пропуск опису об'єкта."""
+    q = upd.callback_query
+    await q.answer()
+    ctx.user_data["comment"] = ""
+    try: await q.edit_message_reply_markup(reply_markup=None)
+    except: pass
+    await _complete_request(upd, ctx)
+    return MENU
+
+
+async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Надсилає фінальне сповіщення адміну і підтверджує клієнту."""
+    u       = upd.effective_user
+    name    = ctx.user_data.get("obj_name", "—")
+    files   = ctx.user_data.get("files", [])
+    comment = ctx.user_data.get("comment", "")
+    phone   = ctx.user_data.get("phone", "—")
+    ts      = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    text = (
+        f"📋 *НОВА ЗАЯВКА*\n{'─'*28}\n"
+        f"👤 *{u.full_name}*\n"
+        f"🆔 `{u.id}` | @{u.username or '—'}\n"
+        f"📱 {phone}\n"
+        f"🕐 {ts}\n\n"
+        f"{name}\n"
+        f"📎 Файлів: *{len(files)}*"
+    )
+    if comment:
+        text += f"\n\n📝 *Опис об'єкта:*\n{comment}"
+    text += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
+
+    await notify(ctx, text)
+
+    reply_text = "✅ *Заявку надіслано!*\nОцінювач перевірить і зв'яжеться з вами."
+    if comment:
+        reply_text += f"\n\n📝 Ваш опис: _{comment}_"
+
+    chat_id = upd.effective_chat.id
+    await ctx.bot.send_message(chat_id, reply_text,
+                               parse_mode="Markdown", reply_markup=main_kb())
 
 
 # ══════════════════════════════════════════════════════════
@@ -1355,6 +1416,10 @@ def build():
             PHOTOGPS: [
                 MessageHandler(filters.PHOTO | filters.LOCATION, handle_photogps),
                 CallbackQueryHandler(on_menu),
+            ],
+            COMMENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_comment),
+                CallbackQueryHandler(skip_comment, pattern="^comment_skip$"),
             ],
             ADMIN: [
                 CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"),
