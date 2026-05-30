@@ -51,7 +51,14 @@ EMAIL       = "info@ocenka24.com.ua"
 PHONE1      = "0 800 502-977"
 PHONE2      = "+38 (050) 3000-173"
 PHONE2_RAW  = "+380503000173"   # для посилань tel:
-MANAGER_TG  = os.getenv("MANAGER_TG", "")   # @username менеджера (без @)
+_mgr_raw    = os.getenv("MANAGER_TG", "")
+# Нормалізуємо до повного URL (приймаємо і username, і https://t.me/...)
+if _mgr_raw.startswith("http"):
+    MANAGER_TG_URL = _mgr_raw
+elif _mgr_raw:
+    MANAGER_TG_URL = f"https://t.me/{_mgr_raw.lstrip('@')}"
+else:
+    MANAGER_TG_URL = ""
 LOGO        = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
@@ -583,9 +590,9 @@ def _start_kb() -> InlineKeyboardMarkup:
     ]
     # Кнопка дзвінка в Telegram (якщо є username менеджера)
     call_row = []
-    if MANAGER_TG:
+    if MANAGER_TG_URL:
         call_row.append(InlineKeyboardButton(
-            "📲 Telegram дзвінок", url=f"tg://resolve?domain={MANAGER_TG}"))
+            "📲 Написати в Telegram", url=MANAGER_TG_URL))
     call_row.append(InlineKeyboardButton(
         "📞 Зателефонувати", url=f"tel:{PHONE2_RAW}"))
     rows.insert(2, call_row)
@@ -752,7 +759,7 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     parse_mode="Markdown")
             except Exception:
                 pass
-        manager_link = f"[менеджеру](tg://resolve?domain={MANAGER_TG})" if MANAGER_TG else "менеджеру"
+        manager_link = f"[менеджеру]({MANAGER_TG_URL})" if MANAGER_TG_URL else "менеджеру"
         await send(
             f"✅ Ваш запит надіслано!\n\n"
             f"Менеджер зв'яжеться з вами найближчим часом.\n\n"
@@ -760,7 +767,7 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"📞 {PHONE2}",
             InlineKeyboardMarkup([
                 *([[InlineKeyboardButton("💬 Написати в Telegram",
-                    url=f"tg://resolve?domain={MANAGER_TG}")]] if MANAGER_TG else []),
+                    url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
                 [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
                 [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
             ]))
