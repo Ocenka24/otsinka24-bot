@@ -1065,19 +1065,36 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await notify(ctx, adm_text)
 
     # ── Підтвердження клієнту ─────────────────────────────
+    _obj_names = {
+        "car":    "транспортного засобу",
+        "flat":   "квартири",
+        "house":  "житлового будинку",
+        "land":   "земельної ділянки",
+        "nonres": "нежитлової нерухомості",
+    }
+    obj_label = _obj_names.get(obj_key, name.split()[-1].lower() if name != "—" else "об'єкта")
+
     client_text = (
-        f"✅ *Заявку на {name} прийнято в роботу!*\n\n"
-        "Представники компанії *ОЦІНКА24* зв'яжуться з вами найближчим часом.\n\n"
+        f"✅ Документи на оцінку {obj_label} надіслані!\n\n"
+        f"Оцінювач розгляне вашу заявку та зв'яжеться з вами найближчим часом.\n\n"
     )
     if delivery:
-        client_text += f"📦 *Дані для доставки звіту:*\n_{delivery}_\n\n"
+        client_text += f"📦 Доставка звіту:\n{delivery}\n\n"
     client_text += (
-        f"☎️ {PHONE1}\n"
-        f"🌐 {WEBSITE}"
+        f"Зв'язатися з оцінювачем:\n"
+        f"📞 {PHONE2}"
     )
+
+    contact_kb_rows = []
+    if MANAGER_TG_URL:
+        contact_kb_rows.append([
+            InlineKeyboardButton("💬 Написати оцінювачу", url=MANAGER_TG_URL)
+        ])
+    contact_kb_rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="home")])
+
     await ctx.bot.send_message(
         upd.effective_chat.id, client_text,
-        parse_mode="Markdown", reply_markup=main_kb())
+        reply_markup=InlineKeyboardMarkup(contact_kb_rows))
 
 
 # ══════════════════════════════════════════════════════════
@@ -1268,7 +1285,7 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     msg   = upd.message
     u     = msg.from_user
     ts    = datetime.now().strftime("%d.%m.%Y %H:%M")
-    jitsi = ctx.user_data.get("jitsi","")
+    jitsi = ctx.user_data.get("jitsi", "")
 
     if msg.location:
         lat, lon = msg.location.latitude, msg.location.longitude
@@ -1279,22 +1296,28 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})")
         await notify_loc(ctx, lat, lon)
         await msg.reply_text(
-            f"✅ *GPS зафіксовано!*\n📌 `{lat:.5f}, {lon:.5f}`",
-            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+            f"GPS зафіксовано: {lat:.5f}, {lon:.5f}",
+            reply_markup=ReplyKeyboardRemove())
     elif msg.text and not msg.text.startswith("/"):
         await notify(ctx, f"📍 *АДРЕСА (відеоогляд)*\n👤 {u.full_name}\n📬 {msg.text.strip()}")
-        await msg.reply_text(f"✅ Адресу зафіксовано!\n📬 {msg.text.strip()}",
-            reply_markup=ReplyKeyboardRemove())
+        await msg.reply_text(f"Адресу зафіксовано: {msg.text.strip()}",
+                             reply_markup=ReplyKeyboardRemove())
     else:
-        await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
+        await msg.reply_text("Поділіться геолокацією або введіть адресу.")
         return VIDEOLOC
 
-    if jitsi:
-        await ctx.bot.send_message(msg.chat.id, "👇 Увійдіть у відеодзвінок:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)
-            ]]))
-    return MENU
+    # Показуємо кнопку відеодзвінка + кнопки продовження
+    video_kb = InlineKeyboardMarkup([
+        *([[InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)]] if jitsi else []),
+        [InlineKeyboardButton("📸 Ще фото з GPS",              callback_data="obj_photogps")],
+        [InlineKeyboardButton("📎 Додати документи",           callback_data="pgps_docs")],
+        [InlineKeyboardButton("✅ Завершити замовлення оцінки", callback_data="done")],
+    ])
+    await ctx.bot.send_message(
+        msg.chat.id,
+        "Що робимо далі?",
+        reply_markup=video_kb)
+    return UPLOAD
 
 
 # ══════════════════════════════════════════════════════════
@@ -1320,7 +1343,7 @@ async def _db_release(conn):
     if pool and conn:
         await pool.release(conn)
     elif conn:
-        await _db_release(conn)
+        await conn.close()
 
 
 async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
