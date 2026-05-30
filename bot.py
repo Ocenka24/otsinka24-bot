@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ОЦІНКА24 — Telegram Bot v5.0 | ОЦІНКА24 + великий GPS + номер телефону"""
+"""ОЦІНКА24 — Telegram Bot v5.3 | Google Maps + Адмін-панель + БД"""
 
 import asyncio, logging, os, uuid
 from datetime import datetime
@@ -7,6 +7,14 @@ from io import BytesIO
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+
+import asyncpg
+
+try:
+    import googlemaps as _googlemaps
+    _gmaps_available = True
+except ImportError:
+    _gmaps_available = False
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -25,9 +33,13 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 # ── Конфіг ────────────────────────────────────────────────
-BOT_TOKEN  = os.getenv("BOT_TOKEN","")
-ADMIN_IDS  = [int(x) for x in os.getenv("ADMIN_IDS","").split(",") if x.strip().isdigit()]
-CHANNEL_ID = int(os.getenv("CHANNEL_ID","0"))
+BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
+ADMIN_IDS          = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+CHANNEL_ID         = int(os.getenv("CHANNEL_ID", "0"))
+DATABASE_URL       = os.getenv("DATABASE_URL")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+gmaps = _googlemaps.Client(key=GOOGLE_MAPS_API_KEY) if (_gmaps_available and GOOGLE_MAPS_API_KEY) else None
 
 WEBSITE = "https://ocenka24.com.ua/"
 EMAIL   = "info@ocenka24.com.ua"
@@ -35,11 +47,63 @@ PHONE1  = "0 800 502-977"
 PHONE2  = "+38 (050) 3000-173"
 LOGO    = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
-
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE = range(6)
+MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN = range(7)
+
+# ══════════════════════════════════════════════════════════
+# ІНІЦІАЛІЗАЦІЯ БАЗИ
+# ══════════════════════════════════════════════════════════
+async def init_db():
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL не задано — БД не ініціалізована")
+        return
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            phone TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS requests (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(user_id),
+            request_type TEXT NOT NULL,
+            status TEXT DEFAULT 'new',
+            address TEXT,
+            lat DOUBLE PRECISION,
+            lon DOUBLE PRECISION,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS request_files (
+            id SERIAL PRIMARY KEY,
+            request_id INTEGER REFERENCES requests(id),
+            file_id TEXT NOT NULL,
+            file_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    await conn.close()
+    logger.info("✅ База даних ініціалізована")
+
+
+async def _save_user(user_id: int, username: str, full_name: str, phone: str):
+    if not DATABASE_URL:
+        return
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            INSERT INTO users (user_id, username, full_name, phone)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET phone=$4, username=$2, full_name=$3
+        ''', user_id, username, full_name, phone)
+        await conn.close()
+    except Exception as e:
+        logger.warning(f"DB save_user error: {e}")
+
 
 # ── Об'єкти оцінки ────────────────────────────────────────
 OBJECTS = {
@@ -107,6 +171,13 @@ def gps_kb(label="📍 Поділитися геолокацією"):
 
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Головне меню", callback_data="home")]])
+
+def admin_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Активні заявки", callback_data="admin_active")],
+        [InlineKeyboardButton("📊 Всі заявки",     callback_data="admin_all")],
+        [InlineKeyboardButton("🏠 Головне меню",   callback_data="home")],
+    ])
 
 
 
@@ -209,8 +280,28 @@ def _get_exif_gps(image: Image.Image):
         return None, None
 
 
+async def _get_address_google(lat: float, lon: float) -> str | None:
+    """Геокодування через Google Maps (якщо налаштовано)."""
+    if not gmaps:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, lambda: gmaps.reverse_geocode((lat, lon), language="uk")
+        )
+        if result:
+            return result[0]["formatted_address"]
+    except Exception as e:
+        logger.warning(f"Google Maps error: {e}")
+    return None
+
+
 async def _get_address(lat: float, lon: float) -> str:
-    """Nominatim (безкоштовно) + BigDataCloud як запасний."""
+    """Google Maps → Nominatim → BigDataCloud."""
+    google_addr = await _get_address_google(lat, lon)
+    if google_addr:
+        return google_addr
+
     urls = [
         f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18",
         f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=uk",
@@ -222,8 +313,8 @@ async def _get_address(lat: float, lon: float) -> str:
             continue
         try:
             j = json.loads(data)
-            addr = j.get("display_name") or ", ".join(filter(None,[
-                j.get("city",""), j.get("principalSubdivision",""), j.get("countryName","")
+            addr = j.get("display_name") or ", ".join(filter(None, [
+                j.get("city", ""), j.get("principalSubdivision", ""), j.get("countryName", "")
             ]))
             if addr:
                 return addr
@@ -407,6 +498,8 @@ async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     ctx.user_data["phone"] = phone
     logger.info(f"Телефон клієнта {u.id}: {phone}")
+
+    await _save_user(u.id, u.username, u.full_name, phone)
 
     # Сповіщаємо адміністраторів
     await notify(ctx,
@@ -765,6 +858,41 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ══════════════════════════════════════════════════════════
+#  АДМІН-ПАНЕЛЬ
+# ══════════════════════════════════════════════════════════
+
+async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    u = upd.effective_user
+    if u.id not in ADMIN_IDS:
+        await upd.message.reply_text("⛔ Доступ заборонено.")
+        return MENU
+
+    if not DATABASE_URL:
+        await upd.message.reply_text("⚠️ База даних не налаштована.")
+        return MENU
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
+        active_count = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='new'")
+        all_count = await conn.fetchval("SELECT COUNT(*) FROM requests")
+        await conn.close()
+    except Exception as e:
+        await upd.message.reply_text(f"⚠️ Помилка БД: {e}")
+        return MENU
+
+    await upd.message.reply_text(
+        f"🔐 *Адмін-панель ОЦІНКА24*\n\n"
+        f"👥 Клієнтів: *{users_count}*\n"
+        f"📋 Активних заявок: *{active_count}*\n"
+        f"📊 Всього заявок: *{all_count}*",
+        parse_mode="Markdown",
+        reply_markup=admin_kb()
+    )
+    return ADMIN
+
+
+# ══════════════════════════════════════════════════════════
 #  ЗБІРКА
 # ══════════════════════════════════════════════════════════
 
@@ -798,10 +926,12 @@ def build():
                 MessageHandler(filters.PHOTO | filters.LOCATION, handle_photogps),
                 CallbackQueryHandler(on_menu),
             ],
+            ADMIN: [CallbackQueryHandler(on_menu, pattern="^home$")],
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
             CommandHandler("start",  cmd_start),
+            CommandHandler("admin",  admin_panel),
         ],
         allow_reentry=True,
     )
@@ -811,11 +941,15 @@ def build():
 
 
 def main():
-    logger.info("🚀 ОЦІНКА24 Bot v5.0 | ОЦІНКА24 + великий GPS")
+    logger.info("🚀 ОЦІНКА24 Bot v5.3 | Google Maps + Адмін-панель + БД")
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)}")
     logger.info(f"   Канал:    {'✅' if CHANNEL_ID else '—'}")
+    logger.info(f"   БД:       {'✅' if DATABASE_URL else '—'}")
+    logger.info(f"   Google Maps: {'✅' if gmaps else '—'}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
+    if DATABASE_URL:
+        asyncio.run(init_db())
     main()
