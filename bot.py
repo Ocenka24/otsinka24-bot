@@ -81,6 +81,7 @@ async def init_db():
             address TEXT,
             lat DOUBLE PRECISION,
             lon DOUBLE PRECISION,
+            comment TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS request_files (
@@ -177,11 +178,34 @@ def gps_kb(label="📍 Поділитися геолокацією"):
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Головне меню", callback_data="home")]])
 
-def admin_kb():
+def admin_main_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Активні заявки", callback_data="admin_active")],
-        [InlineKeyboardButton("📊 Всі заявки",     callback_data="admin_all")],
-        [InlineKeyboardButton("🏠 Головне меню",   callback_data="home")],
+        [InlineKeyboardButton("📋 Активні заявки",  callback_data="adm|active")],
+        [InlineKeyboardButton("📊 Всі заявки",      callback_data="adm|all")],
+        [InlineKeyboardButton("📈 Статистика",      callback_data="adm|stats")],
+        [InlineKeyboardButton("👥 Клієнти",         callback_data="adm|clients")],
+        [InlineKeyboardButton("🏠 Головне меню",    callback_data="home")],
+    ])
+
+# залишаємо alias для сумісності
+def admin_kb():
+    return admin_main_kb()
+
+
+_STATUS_LABELS = {
+    "new":         "🆕 Нова",
+    "in_progress": "🔄 В роботі",
+    "done":        "✅ Виконано",
+    "rejected":    "❌ Відхилено",
+}
+
+def _status_kb(req_id: int, back: str = "adm|active") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Виконано",    callback_data=f"st|{req_id}|done")],
+        [InlineKeyboardButton("🔄 В роботі",   callback_data=f"st|{req_id}|in_progress")],
+        [InlineKeyboardButton("❌ Відхилено",   callback_data=f"st|{req_id}|rejected")],
+        [InlineKeyboardButton("🆕 Нова",        callback_data=f"st|{req_id}|new")],
+        [InlineKeyboardButton("← Назад",        callback_data=back)],
     ])
 
 
@@ -345,46 +369,50 @@ def _get_exif_gps(image: Image.Image):
         return None, None
 
 
-async def _get_address_google(lat: float, lon: float) -> str | None:
-    """Геокодування через Google Maps (якщо налаштовано)."""
-    if not gmaps:
-        return None
-    try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: gmaps.reverse_geocode((lat, lon), language="uk")
-        )
-        if result:
-            return result[0]["formatted_address"]
-    except Exception as e:
-        logger.warning(f"Google Maps error: {e}")
-    return None
-
-
 async def _get_address(lat: float, lon: float) -> str:
-    """Google Maps → Nominatim → BigDataCloud."""
-    google_addr = await _get_address_google(lat, lon)
-    if google_addr:
-        return google_addr
-
-    urls = [
-        f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18",
-        f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=uk",
-    ]
+    """Пріоритет: Google Maps → BigDataCloud → Nominatim."""
     import json
-    for url in urls:
-        data = await _fetch_async(url)
-        if not data:
-            continue
+
+    # 1. Google Maps
+    if gmaps:
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: gmaps.reverse_geocode((lat, lon), language="uk")
+            )
+            if result:
+                return result[0]["formatted_address"]
+        except Exception as e:
+            logger.warning(f"Google Maps error: {e}")
+
+    # 2. BigDataCloud
+    url = (f"https://api.bigdatacloud.net/data/reverse-geocode-client"
+           f"?latitude={lat}&longitude={lon}&localityLanguage=uk")
+    data = await _fetch_async(url)
+    if data:
         try:
             j = json.loads(data)
             addr = j.get("display_name") or ", ".join(filter(None, [
                 j.get("city", ""), j.get("principalSubdivision", ""), j.get("countryName", "")
             ]))
+            if addr and addr.strip(", "):
+                return addr
+        except Exception:
+            pass
+
+    # 3. Nominatim
+    url = (f"https://nominatim.openstreetmap.org/reverse"
+           f"?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18")
+    data = await _fetch_async(url)
+    if data:
+        try:
+            j = json.loads(data)
+            addr = j.get("display_name", "")
             if addr:
                 return addr
         except Exception:
             pass
+
     return ""
 
 
@@ -998,34 +1026,308 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 #  АДМІН-ПАНЕЛЬ
 # ══════════════════════════════════════════════════════════
 
+async def _db_connect():
+    return await asyncpg.connect(DATABASE_URL)
+
+
 async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     u = upd.effective_user
     if u.id not in ADMIN_IDS:
         await upd.message.reply_text("⛔ Доступ заборонено.")
         return MENU
-
     if not DATABASE_URL:
         await upd.message.reply_text("⚠️ База даних не налаштована.")
         return MENU
+    await _show_admin_home(upd.message, ctx)
+    return ADMIN
 
+
+async def _show_admin_home(msg_or_query, ctx):
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        active_count = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='new'")
-        all_count = await conn.fetchval("SELECT COUNT(*) FROM requests")
+        conn = await _db_connect()
+        users_cnt  = await conn.fetchval("SELECT COUNT(*) FROM users")
+        active_cnt = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='new'")
+        work_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='in_progress'")
+        done_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='done'")
+        all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
         await conn.close()
     except Exception as e:
-        await upd.message.reply_text(f"⚠️ Помилка БД: {e}")
-        return MENU
+        text = f"⚠️ Помилка БД: {e}"
+        if hasattr(msg_or_query, "edit_message_text"):
+            await msg_or_query.edit_message_text(text)
+        else:
+            await msg_or_query.reply_text(text)
+        return
 
-    await upd.message.reply_text(
-        f"🔐 *Адмін-панель ОЦІНКА24*\n\n"
-        f"👥 Клієнтів: *{users_count}*\n"
-        f"📋 Активних заявок: *{active_count}*\n"
-        f"📊 Всього заявок: *{all_count}*",
-        parse_mode="Markdown",
-        reply_markup=admin_kb()
+    text = (
+        "🔐 *Адмін-панель ОЦІНКА24*\n"
+        f"{'─' * 28}\n"
+        f"👥 Клієнтів: *{users_cnt}*\n"
+        f"📋 Нових заявок: *{active_cnt}*\n"
+        f"🔄 В роботі: *{work_cnt}*\n"
+        f"✅ Виконано: *{done_cnt}*\n"
+        f"📊 Всього: *{all_cnt}*"
     )
+    if hasattr(msg_or_query, "edit_message_text"):
+        await msg_or_query.edit_message_text(text, parse_mode="Markdown",
+                                              reply_markup=admin_main_kb())
+    else:
+        await msg_or_query.reply_text(text, parse_mode="Markdown",
+                                       reply_markup=admin_main_kb())
+
+
+async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обробник усіх adm|* та st|* колбеків."""
+    q = upd.callback_query
+    await q.answer()
+
+    if q.from_user.id not in ADMIN_IDS:
+        await q.answer("⛔ Доступ заборонено", show_alert=True)
+        return ADMIN
+
+    data = q.data
+
+    # ── Головна адмін-сторінка ────────────────────────────
+    if data == "adm|home":
+        await _show_admin_home(q, ctx)
+        return ADMIN
+
+    # ── Активні заявки ────────────────────────────────────
+    if data == "adm|active":
+        return await _admin_list(q, "new", "📋 Нові заявки")
+
+    # ── Всі заявки ────────────────────────────────────────
+    if data == "adm|all":
+        return await _admin_list(q, None, "📊 Всі заявки")
+
+    # ── Статистика ────────────────────────────────────────
+    if data == "adm|stats":
+        return await _admin_stats(q)
+
+    # ── Клієнти ───────────────────────────────────────────
+    if data == "adm|clients":
+        return await _admin_clients(q)
+
+    # ── Деталі заявки view|{id} ───────────────────────────
+    if data.startswith("adm|view|"):
+        req_id = int(data.split("|")[2])
+        return await _admin_view_request(q, req_id)
+
+    # ── Зміна статусу st|{id}|{status} ───────────────────
+    if data.startswith("st|"):
+        _, req_id, new_status = data.split("|")
+        return await _admin_set_status(q, ctx, int(req_id), new_status)
+
+    return ADMIN
+
+
+async def _admin_list(q, status_filter: str | None, title: str) -> int:
+    if not DATABASE_URL:
+        await q.edit_message_text("⚠️ БД не налаштована.")
+        return ADMIN
+    try:
+        conn = await _db_connect()
+        if status_filter:
+            rows = await conn.fetch("""
+                SELECT r.id, r.request_type, r.status, r.created_at,
+                       u.full_name, u.phone
+                FROM requests r JOIN users u ON r.user_id = u.user_id
+                WHERE r.status = $1
+                ORDER BY r.created_at DESC LIMIT 20
+            """, status_filter)
+        else:
+            rows = await conn.fetch("""
+                SELECT r.id, r.request_type, r.status, r.created_at,
+                       u.full_name, u.phone
+                FROM requests r JOIN users u ON r.user_id = u.user_id
+                ORDER BY r.created_at DESC LIMIT 20
+            """)
+        await conn.close()
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        return ADMIN
+
+    if not rows:
+        await q.edit_message_text(
+            f"{title}\n\nЗаявок не знайдено.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад", callback_data="adm|home")
+            ]]))
+        return ADMIN
+
+    text = f"*{title}* ({len(rows)}):\n\n"
+    keyboard = []
+    for r in rows:
+        status_icon = {"new": "🆕", "in_progress": "🔄", "done": "✅", "rejected": "❌"}.get(r["status"], "❓")
+        dt = r["created_at"].strftime("%d.%m %H:%M") if r["created_at"] else "—"
+        label = f"{status_icon} #{r['id']} {r['request_type']} | {r['full_name']} | {dt}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"adm|view|{r['id']}")])
+
+    keyboard.append([InlineKeyboardButton("← Назад", callback_data="adm|home")])
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(keyboard))
+    return ADMIN
+
+
+async def _admin_view_request(q, req_id: int) -> int:
+    try:
+        conn = await _db_connect()
+        req = await conn.fetchrow("""
+            SELECT r.*, u.full_name, u.phone, u.username
+            FROM requests r JOIN users u ON r.user_id = u.user_id
+            WHERE r.id = $1
+        """, req_id)
+        await conn.close()
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        return ADMIN
+
+    if not req:
+        await q.edit_message_text("⚠️ Заявку не знайдено.")
+        return ADMIN
+
+    status_label = _STATUS_LABELS.get(req["status"], req["status"])
+    maps_link = ""
+    if req["lat"] and req["lon"]:
+        maps_link = f"\n🗺 [Google Maps](https://maps.google.com/?q={req['lat']},{req['lon']})"
+
+    text = (
+        f"📋 *Заявка #{req['id']}*\n"
+        f"{'─' * 24}\n"
+        f"📌 Тип: *{req['request_type']}*\n"
+        f"🏷 Статус: *{status_label}*\n"
+        f"👤 Клієнт: {req['full_name']}\n"
+        f"📱 Телефон: `{req['phone'] or '—'}`\n"
+        f"🆔 @{req['username'] or '—'} | `{req['user_id']}`\n"
+        f"📬 Адреса: {req['address'] or '—'}\n"
+        f"📍 GPS: `{req['lat']}, {req['lon']}`{maps_link}\n"
+        f"🕐 {req['created_at'].strftime('%d.%m.%Y %H:%M') if req['created_at'] else '—'}\n\n"
+        f"[✉️ Написати клієнту](tg://user?id={req['user_id']})"
+    )
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=_status_kb(req_id),
+                               disable_web_page_preview=True)
+    return ADMIN
+
+
+async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
+    try:
+        conn = await _db_connect()
+        req = await conn.fetchrow("""
+            SELECT r.*, u.full_name, u.user_id
+            FROM requests r JOIN users u ON r.user_id = u.user_id
+            WHERE r.id = $1
+        """, req_id)
+        await conn.execute("UPDATE requests SET status=$1 WHERE id=$2", new_status, req_id)
+        await conn.close()
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        return ADMIN
+
+    label = _STATUS_LABELS.get(new_status, new_status)
+    await q.edit_message_text(
+        f"✅ Заявка *#{req_id}* → {label}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("← До заявки",    callback_data=f"adm|view|{req_id}")],
+            [InlineKeyboardButton("📋 До списку",   callback_data="adm|active")],
+            [InlineKeyboardButton("🏠 Адмін-меню",  callback_data="adm|home")],
+        ]))
+
+    # Сповіщення клієнту
+    status_msgs = {
+        "done":        "✅ Ваша заявка *виконана*! Оцінювач завершив роботу.",
+        "in_progress": "🔄 Ваша заявка *прийнята в роботу*. Очікуйте на зв'язок.",
+        "rejected":    "❌ Ваша заявка *відхилена*. Зверніться до підтримки.",
+        "new":         "🆕 Ваша заявка *повернута* в чергу.",
+    }
+    if req and new_status in status_msgs:
+        try:
+            await ctx.bot.send_message(
+                req["user_id"],
+                f"{status_msgs[new_status]}\n\n"
+                f"Заявка: *#{req_id}* — {req['request_type']}",
+                parse_mode="Markdown")
+        except Exception:
+            pass
+    return ADMIN
+
+
+async def _admin_stats(q) -> int:
+    try:
+        conn = await _db_connect()
+        total_users    = await conn.fetchval("SELECT COUNT(*) FROM users")
+        today_users    = await conn.fetchval(
+            "SELECT COUNT(*) FROM users WHERE created_at::date = CURRENT_DATE")
+        total_requests = await conn.fetchval("SELECT COUNT(*) FROM requests")
+        today_requests = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE created_at::date = CURRENT_DATE")
+        by_type = await conn.fetch(
+            "SELECT request_type, COUNT(*) as cnt FROM requests GROUP BY request_type ORDER BY cnt DESC")
+        by_status = await conn.fetch(
+            "SELECT status, COUNT(*) as cnt FROM requests GROUP BY status")
+        await conn.close()
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        return ADMIN
+
+    type_lines = "\n".join(f"  • {r['request_type']}: *{r['cnt']}*" for r in by_type)
+    status_lines = "\n".join(
+        f"  • {_STATUS_LABELS.get(r['status'], r['status'])}: *{r['cnt']}*"
+        for r in by_status)
+
+    text = (
+        "📈 *Статистика ОЦІНКА24*\n"
+        f"{'─' * 28}\n"
+        f"👥 Клієнтів всього: *{total_users}* (сьогодні: *{today_users}*)\n"
+        f"📋 Заявок всього: *{total_requests}* (сьогодні: *{today_requests}*)\n\n"
+        f"*По типах:*\n{type_lines or '  —'}\n\n"
+        f"*По статусах:*\n{status_lines or '  —'}"
+    )
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup([[
+                                   InlineKeyboardButton("← Назад", callback_data="adm|home")
+                               ]]))
+    return ADMIN
+
+
+async def _admin_clients(q) -> int:
+    try:
+        conn = await _db_connect()
+        clients = await conn.fetch("""
+            SELECT u.user_id, u.full_name, u.phone, u.username, u.created_at,
+                   COUNT(r.id) as req_cnt
+            FROM users u
+            LEFT JOIN requests r ON r.user_id = u.user_id
+            GROUP BY u.user_id, u.full_name, u.phone, u.username, u.created_at
+            ORDER BY u.created_at DESC LIMIT 20
+        """)
+        await conn.close()
+    except Exception as e:
+        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        return ADMIN
+
+    if not clients:
+        await q.edit_message_text(
+            "👥 Клієнтів ще немає.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад", callback_data="adm|home")
+            ]]))
+        return ADMIN
+
+    lines = []
+    for c in clients:
+        dt = c["created_at"].strftime("%d.%m.%Y") if c["created_at"] else "—"
+        lines.append(
+            f"👤 *{c['full_name']}* | `{c['phone'] or '—'}`\n"
+            f"   @{c['username'] or '—'} | Заявок: {c['req_cnt']} | {dt}"
+        )
+    text = f"👥 *Клієнти* (останні {len(clients)}):\n\n" + "\n\n".join(lines)
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup([[
+                                   InlineKeyboardButton("← Назад", callback_data="adm|home")
+                               ]]))
     return ADMIN
 
 
@@ -1068,7 +1370,10 @@ def build():
                 MessageHandler(filters.PHOTO | filters.LOCATION, handle_photogps),
                 CallbackQueryHandler(on_menu),
             ],
-            ADMIN: [CallbackQueryHandler(on_menu, pattern="^home$")],
+            ADMIN: [
+                CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"),
+                CallbackQueryHandler(on_menu, pattern="^home$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
@@ -1077,9 +1382,6 @@ def build():
         ],
         allow_reentry=True,
     )
-    app.add_handler(conv)
-    app.add_error_handler(err_handler)
-    return app
 
 
 def main():
