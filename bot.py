@@ -600,37 +600,34 @@ def _start_kb() -> InlineKeyboardMarkup:
 
 
 async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    u = upd.effective_user
-    name = u.first_name or "Друже"
+    logger.info(f"/start від {upd.effective_user.id}")
+    u    = upd.effective_user
+    name = (u.first_name or "").strip() or "Друже"
 
     has_phone = bool(ctx.user_data.get("phone"))
 
     if has_phone:
-        text = f"👋 З поверненням, {name}!\n\nОберіть тип оцінки:"
+        text = f"З поверненням, {name}! Оберіть тип оцінки:"
         kb   = main_kb()
     else:
         text = (
-            f"👋 Вітаємо, {name}!\n\n"
-            "🏢 ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
-            "✅ Сертифіковані оцінювачі\n"
-            "✅ Досвід понад 10 років\n"
-            "✅ Звіти для банків, нотаріусів, судів\n\n"
-            f"📞 {PHONE1}\n"
-            f"📱 {PHONE2}\n"
-            f"🌐 {WEBSITE}"
+            f"Вітаємо, {name}!\n\n"
+            "ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
+            f"Тел: {PHONE1}\n"
+            f"Моб: {PHONE2}\n"
+            f"Сайт: {WEBSITE}"
         )
         kb = _start_kb()
 
-    for attempt in (
-        lambda: upd.message.reply_photo(photo=LOGO, caption=text, reply_markup=kb),
-        lambda: upd.message.reply_text(text, reply_markup=kb),
-        lambda: upd.message.reply_text("👋 Вітаємо! ОЦІНКА24 — оцінка майна по всій Україні."),
-    ):
-        try:
-            await attempt()
-            break
-        except Exception as e:
-            logger.warning(f"cmd_start send attempt failed: {e}")
+    msg = upd.message or (upd.callback_query.message if upd.callback_query else None)
+    if not msg:
+        logger.error("cmd_start: немає message об'єкта")
+        return MENU
+
+    try:
+        await msg.reply_text(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"cmd_start reply_text failed: {e}")
 
     return MENU
 
@@ -1635,9 +1632,19 @@ async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _post_init(app):
+    # Видаляємо webhook щоб не було конфлікту з polling
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook видалено")
+    except Exception as e:
+        logger.warning(f"delete_webhook: {e}")
+
     if DATABASE_URL:
-        await _get_pool()   # ініціалізуємо пул з'єднань
-        await init_db()
+        try:
+            await _get_pool()
+            await init_db()
+        except Exception as e:
+            logger.error(f"DB init error: {e}")
 
 
 def build():
