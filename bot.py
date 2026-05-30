@@ -588,14 +588,8 @@ def _start_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("ℹ️ Умови та вартість",     callback_data="pre_info")],
         [InlineKeyboardButton("💬 Написати менеджеру",    callback_data="pre_write")],
     ]
-    # Кнопка дзвінка в Telegram (якщо є username менеджера)
-    call_row = []
     if MANAGER_TG_URL:
-        call_row.append(InlineKeyboardButton(
-            "📲 Написати в Telegram", url=MANAGER_TG_URL))
-    call_row.append(InlineKeyboardButton(
-        "📞 Зателефонувати", url=f"tel:{PHONE2_RAW}"))
-    rows.insert(2, call_row)
+        rows.append([InlineKeyboardButton("📲 Написати в Telegram", url=MANAGER_TG_URL)])
     rows.append([InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
                  InlineKeyboardButton("📞 Контакти",     callback_data="contact")])
     return InlineKeyboardMarkup(rows)
