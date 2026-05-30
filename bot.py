@@ -222,22 +222,56 @@ async def notify_loc(ctx, lat, lon):
 #  ФОТО+GPS: ОБРОБКА ЗОБРАЖЕНЬ
 # ══════════════════════════════════════════════════════════
 
+_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_cyr.ttf")
+
+# Шляхи до шрифтів з підтримкою кирилиці
+_FONT_PATHS = [
+    _FONT_FILE,
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "arial.ttf",
+]
+
+
+async def _ensure_cyrillic_font():
+    """Завантажує шрифт з підтримкою кирилиці якщо жоден не знайдено."""
+    for p in _FONT_PATHS[1:]:  # пропускаємо _FONT_FILE при перевірці
+        if os.path.exists(p):
+            logger.info(f"Шрифт знайдено: {p}")
+            return
+    if os.path.exists(_FONT_FILE):
+        return
+    logger.info("Завантажую шрифт з підтримкою кирилиці...")
+    url = "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf"
+    data = await _fetch_async(url)
+    if data:
+        with open(_FONT_FILE, "wb") as f:
+            f.write(data)
+        logger.info("✅ Шрифт Roboto-Bold завантажено")
+    else:
+        logger.warning("⚠️ Не вдалося завантажити шрифт — кирилиця може не відображатися")
+
+
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
-        "arial.ttf",
-    ]
-    for p in paths:
-        try: return ImageFont.truetype(p, size)
-        except: pass
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    for p in _FONT_PATHS:
+        try:
+            f = ImageFont.truetype(p, size)
+            _FONT_CACHE[size] = f
+            return f
+        except Exception:
+            pass
     return ImageFont.load_default()
 
 
 def _text_h(draw: ImageDraw.Draw, text: str, font) -> int:
-    """Висота тексту через textbbox (сумісно з Pillow 10+)."""
     bb = draw.textbbox((0, 0), text, font=font)
     return bb[3] - bb[1]
 
@@ -247,12 +281,29 @@ def _text_w(draw: ImageDraw.Draw, text: str, font) -> int:
     return bb[2] - bb[0]
 
 
+def _wrap_text(draw: ImageDraw.Draw, text: str, font, max_width: int) -> list[str]:
+    """Розбиває текст на рядки щоб вмістити у max_width пікселів."""
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if _text_w(draw, test, font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
 async def _fetch_async(url: str) -> bytes | None:
     loop = asyncio.get_running_loop()
     def _sync():
         import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/5.3"})
+        with urllib.request.urlopen(req, timeout=15) as r:
             return r.read()
     try:
         return await loop.run_in_executor(None, _sync)
@@ -328,18 +379,28 @@ async def _get_address(lat: float, lon: float) -> str:
     return ""
 
 
-async def _get_map(lat: float, lon: float, px: int = 320) -> Image.Image | None:
-    """Статична карта з OpenStreetMap."""
-    url = (
-        f"https://staticmap.openstreetmap.de/staticmap.php"
-        f"?center={lat},{lon}&zoom=16&size={px}x{px}"
-        f"&markers={lat},{lon},lightblue1"
-    )
-    data = await _fetch_async(url)
-    if data:
-        try: return Image.open(BytesIO(data)).convert("RGB")
-        except Exception: pass
+async def _get_map(lat: float, lon: float, px: int = 450) -> Image.Image | None:
+    """Статична карта з OpenStreetMap з маркером."""
+    for zoom in (17, 16, 15):
+        url = (
+            f"https://staticmap.openstreetmap.de/staticmap.php"
+            f"?center={lat},{lon}&zoom={zoom}&size={px}x{px}"
+            f"&markers={lat},{lon},red-pushpin"
+        )
+        data = await _fetch_async(url)
+        if data:
+            try:
+                return Image.open(BytesIO(data)).convert("RGB")
+            except Exception:
+                continue
     return None
+
+
+def _draw_text_shadow(draw, pos, text, font, fill, shadow=(0, 0, 0, 200), offset=3):
+    """Малює текст з тінню для кращої читабельності."""
+    x, y = pos
+    draw.text((x + offset, y + offset), text, font=font, fill=shadow)
+    draw.text((x, y), text, font=font, fill=fill)
 
 
 async def build_geotagged_photo(
@@ -350,93 +411,128 @@ async def build_geotagged_photo(
     ts: str = "",
 ) -> BytesIO:
     """
-    Накладає на фото:
-      • ОЦІНКА24 — жовтий напис, правий нижній кут
-      • Нижня напівпрозора панель: GPS + адреса + дата
-      • Міні-карта у золотій рамці, лівий верхній кут
+    Накладає на фото великим читабельним текстом (кирилиця):
+      • Карта розташування (ліворуч, ~45% ширини)
+      • Темна панель знизу:
+          - Координати GPS (великий білий текст)
+          - Адреса (великий блакитний, перенос рядків)
+          - Дата/час і сайт (менший зелений)
+      • ОЦІНКА24 (золотий, правий верхній кут)
     """
-    # ── Відкриваємо і виправляємо орієнтацію ─────────────
     img = Image.open(BytesIO(photo_bytes))
     img = ImageOps.exif_transpose(img)
     img = img.convert("RGBA")
     W, H = img.size
 
-    pad = max(24, W // 44)
+    pad = max(20, W // 50)
 
-    # ── Шрифти (всі великі і читабельні) ─────────────────
-    f_brand = _load_font(max(56, W // 16))   # ОЦІНКА24
-    f_gps   = _load_font(max(52, W // 16))   # GPS координати (великий)
-    f_addr  = _load_font(max(30, W // 28))   # Адреса
-    f_time  = _load_font(max(26, W // 36))   # Дата/час
+    # ── Шрифти — великі, читабельні, з кирилицею ─────────
+    f_brand = _load_font(max(64, W // 14))    # ОЦІНКА24
+    f_label = _load_font(max(38, W // 22))    # підписи "КООРДИНАТИ:" "АДРЕСА:"
+    f_gps   = _load_font(max(52, W // 17))    # координати
+    f_addr  = _load_font(max(44, W // 19))    # адреса
+    f_time  = _load_font(max(32, W // 30))    # дата і сайт
 
-    # ── Міні-карта ────────────────────────────────────────
+    tmp_draw = ImageDraw.Draw(img)
+
+    # ── Завантажуємо карту ────────────────────────────────
     map_img = None
+    map_px = min(int(W * 0.44), 520)
     if lat and lon:
-        map_px  = min(W // 3, 340)
         map_img = await _get_map(lat, lon, map_px)
 
-    # ── Висота нижньої панелі ─────────────────────────────
-    tmp_draw = ImageDraw.Draw(img)
-    line_gps  = _text_h(tmp_draw, "00.000000", f_gps)  + 10
-    line_addr = _text_h(tmp_draw, "Адреса",    f_addr) + 8
-    line_time = _text_h(tmp_draw, "00:00",     f_time) + 6
-    panel_h   = pad * 2 + line_gps + line_addr + line_time
+    # ── Розраховуємо висоту нижньої панелі ───────────────
+    lh_label = _text_h(tmp_draw, "К", f_label) + 6
+    lh_gps   = _text_h(tmp_draw, "0", f_gps)   + 12
+    lh_addr  = _text_h(tmp_draw, "А", f_addr)  + 10
+    lh_time  = _text_h(tmp_draw, "0", f_time)  + 8
+
+    # Ширина тексту в панелі (без карти якщо є)
+    text_x = pad
+    text_max_w = W - pad * 2
+
+    addr_display = address if address else "Адресу не визначено"
+    addr_lines = _wrap_text(tmp_draw, addr_display, f_addr, text_max_w)
+
+    panel_h = (pad
+               + lh_label + lh_gps          # GPS-блок
+               + pad // 2
+               + lh_label + lh_addr * len(addr_lines)  # адреса-блок
+               + pad // 2
+               + lh_time                    # дата/сайт
+               + pad)
 
     # ── Напівпрозора панель знизу ─────────────────────────
-    overlay = Image.new("RGBA", (W, panel_h), (10, 10, 30, 210))
-    img.paste(overlay, (0, H - panel_h), overlay)
+    panel_top = H - panel_h
+    overlay = Image.new("RGBA", (W, panel_h), (8, 12, 35, 225))
+    img.paste(overlay, (0, panel_top), overlay)
+
+    # Золота лінія-роздільник зверху панелі
+    sep = Image.new("RGBA", (W, 5), (255, 215, 0, 220))
+    img.paste(sep, (0, panel_top), sep)
 
     draw = ImageDraw.Draw(img)
 
-    # ── ОЦІНКА24 — правий нижній кут (над панеллю) ────────
+    # ── ОЦІНКА24 — правий верхній кут ────────────────────
     brand = "ОЦІНКА24"
     bw = _text_w(draw, brand, f_brand)
-    bh = _text_h(draw, brand, f_brand)
-    bx = W - bw - pad
-    by = H - panel_h - bh - pad // 2
-    # Тінь
-    draw.text((bx+4, by+4), brand, font=f_brand, fill=(0,0,0,180))
-    # Золотий текст
-    draw.text((bx, by), brand, font=f_brand, fill=(255,215,0,255))
+    _draw_text_shadow(draw, (W - bw - pad, pad), brand, f_brand,
+                      fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=4)
 
-    # ── Вміст панелі ──────────────────────────────────────
-    y = H - panel_h + pad
-
-    if lat and lon:
-        gps_text = f"📍  {lat:.6f},  {lon:.6f}"
-        draw.text((pad+2, y+2), gps_text, font=f_gps, fill=(0,0,0,200))
-        draw.text((pad,   y),   gps_text, font=f_gps, fill=(255,255,255,255))
-        y += line_gps
-
-    addr_line = address[:100] + ("…" if len(address) > 100 else "") if address else "GPS адреса не визначена"
-    draw.text((pad+1, y+1), addr_line, font=f_addr, fill=(0,0,0,180))
-    draw.text((pad,   y),   addr_line, font=f_addr, fill=(180,230,255,255))
-    y += line_addr
-
-    # Дата — зліва
-    draw.text((pad+1, y+1), ts, font=f_time, fill=(0,0,0,180))
-    draw.text((pad,   y),   ts, font=f_time, fill=(160,255,160,255))
-    # Сайт — справа
-    site_w = _text_w(draw, WEBSITE, f_time)
-    draw.text((W - site_w - pad, y), WEBSITE, font=f_time, fill=(180,180,255,255))
-
-    # ── Міні-карта у золотій рамці ────────────────────────
+    # ── Карта — лівий верхній кут ─────────────────────────
     if map_img:
         mw, mh = map_img.size
-        border  = 8
-        frame   = Image.new("RGB", (mw + border*2, mh + border*2), (255, 215, 0))
+        border = 6
+        # золота рамка
+        frame = Image.new("RGBA", (mw + border * 2, mh + border * 2), (255, 215, 0, 255))
         frame.paste(map_img, (border, border))
-        frame_rgba = frame.convert("RGBA")
-        img.paste(frame_rgba, (pad, pad), frame_rgba)
-        # Підпис під картою
-        cap_y = pad + mh + border*2 + 6
-        draw.text((pad+1, cap_y+1), "📍 Місце зйомки", font=f_time, fill=(0,0,0,200))
-        draw.text((pad,   cap_y),   "📍 Місце зйомки", font=f_time, fill=(255,215,0,255))
+        img.paste(frame, (pad, pad + _text_h(draw, brand, f_brand) + pad))
+
+        # підпис "КАРТА МІСЦЯ"
+        cap_y = pad + _text_h(draw, brand, f_brand) + pad + mh + border * 2 + 6
+        if cap_y + lh_time < panel_top:
+            _draw_text_shadow(draw, (pad, cap_y), "КАРТА МІСЦЯ", f_time,
+                              fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200))
+
+    # ── Вміст панелі ──────────────────────────────────────
+    y = panel_top + pad
+
+    # GPS координати
+    _draw_text_shadow(draw, (text_x, y), "КООРДИНАТИ:", f_label,
+                      fill=(255, 215, 0, 200), shadow=(0, 0, 0, 150))
+    y += lh_label
+
+    if lat and lon:
+        gps_text = f"{lat:.6f},  {lon:.6f}"
+    else:
+        gps_text = "GPS не визначено"
+    _draw_text_shadow(draw, (text_x, y), gps_text, f_gps,
+                      fill=(255, 255, 255, 255), shadow=(0, 0, 0, 220), offset=3)
+    y += lh_gps + pad // 2
+
+    # Адреса
+    _draw_text_shadow(draw, (text_x, y), "АДРЕСА:", f_label,
+                      fill=(255, 215, 0, 200), shadow=(0, 0, 0, 150))
+    y += lh_label
+
+    for line in addr_lines:
+        _draw_text_shadow(draw, (text_x, y), line, f_addr,
+                          fill=(160, 220, 255, 255), shadow=(0, 0, 0, 220), offset=3)
+        y += lh_addr
+
+    y += pad // 2
+
+    # Дата — зліва
+    _draw_text_shadow(draw, (text_x, y), ts, f_time,
+                      fill=(140, 255, 140, 255), shadow=(0, 0, 0, 180))
+    # Сайт — справа
+    site_w = _text_w(draw, WEBSITE, f_time)
+    _draw_text_shadow(draw, (W - site_w - pad, y), WEBSITE, f_time,
+                      fill=(180, 180, 255, 255), shadow=(0, 0, 0, 180))
 
     # ── Зберігаємо ────────────────────────────────────────
-    result = img.convert("RGB")
     out = BytesIO()
-    result.save(out, format="JPEG", quality=93, optimize=True)
+    img.convert("RGB").save(out, format="JPEG", quality=94, optimize=True)
     out.seek(0)
     return out
 
@@ -955,6 +1051,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if DATABASE_URL:
-        asyncio.run(init_db())
+    async def _startup():
+        if DATABASE_URL:
+            await init_db()
+        await _ensure_cyrillic_font()
+    asyncio.run(_startup())
     main()
