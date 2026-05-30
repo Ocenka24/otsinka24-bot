@@ -169,6 +169,7 @@ def main_kb():
         [InlineKeyboardButton("🏡 Оцінка будинку",       callback_data="obj_house")],
         [InlineKeyboardButton("🌿 Оцінка землі",         callback_data="obj_land")],
         [InlineKeyboardButton("🏭 Нежитлова нерухомість",callback_data="obj_nonres")],
+        [InlineKeyboardButton("💰 Ціни на оцінку",       callback_data="pre_info")],
         [InlineKeyboardButton("📍 Геолокація",           callback_data="location")],
         [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
          InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
@@ -743,13 +744,13 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if d == "pre_info":
         await send(
             "📋 *Умови та вартість оцінки*\n\n"
-            "🚗 *Оцінка авто* — від 500 грн, термін 1 день\n"
-            "🏠 *Оцінка квартири* — від 700 грн, термін 1–2 дні\n"
-            "🏡 *Оцінка будинку* — від 1200 грн, термін 2–3 дні\n"
-            "🌿 *Оцінка землі* — від 800 грн, термін 2–3 дні\n"
-            "🏭 *Нежитлова нерухомість* — від 1500 грн, за домовленістю\n\n"
+            "🚗 *Оцінка авто* — від 1000 грн, термін 1 день\n"
+            "🏠 *Оцінка квартири* — від 1500 грн, термін 1–2 дні\n"
+            "🏡 *Оцінка будинку* — від 1500 грн, термін 1–2 дні\n"
+            "🌿 *Оцінка землі* — від 1500 грн, термін 2–3 дні\n"
+            "🏭 *Нежитлова нерухомість* — від 2500 грн, за домовленістю\n\n"
             "📦 Звіт надсилається Новою Поштою або електронно\n"
-            "🎯 Оцінка для банку, нотаріуса, суду, страховки\n\n"
+            "🎯 Оцінка для банку, нотаріуса, суду, страховки, органів опіки\n\n"
             f"📞 Уточнити вартість: {PHONE2}\n"
             f"🌐 {WEBSITE}",
             InlineKeyboardMarkup([
