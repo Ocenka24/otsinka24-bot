@@ -672,6 +672,14 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception as e:
         logger.error(f"cmd_start reply_text failed: {e}")
 
+    # Логотип у футері
+    try:
+        await msg.reply_photo(
+            photo=LOGO,
+            caption="🏢 ОЦІНКА24 — офіційний бот компанії\nocenka24.com.ua")
+    except Exception:
+        pass
+
     return MENU
 
 
