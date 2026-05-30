@@ -101,23 +101,26 @@ async def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
-    await conn.close()
+    await _db_release(conn)
     logger.info("✅ База даних ініціалізована")
 
 
 async def _save_user(user_id: int, username: str, full_name: str, phone: str):
     if not DATABASE_URL:
         return
+    conn = None
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await _db_connect()
         await conn.execute('''
             INSERT INTO users (user_id, username, full_name, phone)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (user_id) DO UPDATE SET phone=$4, username=$2, full_name=$3
         ''', user_id, username, full_name, phone)
-        await conn.close()
     except Exception as e:
         logger.warning(f"DB save_user error: {e}")
+    finally:
+        if conn:
+            await _db_release(conn)
 
 
 # ── Об'єкти оцінки ────────────────────────────────────────
@@ -482,9 +485,9 @@ async def build_geotagged_photo(
     img = img.convert("RGBA")
     W, H = img.size
 
-    # Розміри шрифтів ~10% від розміру фото
-    base = max(int(H * 0.025), 10)   # ~2.5% висоти = базовий розмір
-    pad  = max(6, base // 3)
+    # Розміри шрифтів ~5% від розміру фото (зменшено на 50%)
+    base = max(int(H * 0.013), 8)
+    pad  = max(4, base // 3)
 
     f_brand = _load_font(base * 2)
     f_label = _load_font(int(base * 1.2))
@@ -826,9 +829,10 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         except: pass
         await ctx.bot.send_message(
             upd.effective_chat.id,
-            "📸 *Фото з GPS*\n\n"
-            "Надішліть фото або спочатку поділіться геолокацією.",
-            parse_mode="Markdown")
+            "📸 Фото з GPS\n\n"
+            "Крок 1 — натисніть кнопку нижче та поділіться геолокацією.\n"
+            "Крок 2 — зробіть НОВЕ фото камерою (не з галереї!).\n\n"
+            "⚠️ Фото з галереї не містять GPS-координат.")
         await ctx.bot.send_message(
             upd.effective_chat.id,
             "📍 НАДІСЛАТИ ГЕОЛОКАЦІЮ ОБ'ЄКТА",
@@ -889,13 +893,12 @@ async def show_object(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> 
 async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     msg   = upd.message
     u     = msg.from_user
-    name  = ctx.user_data.get("obj_name","Документ")
-    files = ctx.user_data.setdefault("files",[])
-    phone   = ctx.user_data.get("phone","—")
+    name  = ctx.user_data.get("obj_name", "Документ")
+    files = ctx.user_data.setdefault("files", [])
+    phone = ctx.user_data.get("phone", "—")
     caption = f"{name}\n👤 {u.full_name} | 🆔 `{u.id}`\n📱 @{u.username or '—'} | ☎️ {phone}"
 
     if msg.photo:
-        # Для документів — без геотегу, просто пересилаємо
         await notify_photo(ctx, msg.photo[-1].file_id, caption)
         files.append(msg.photo[-1].file_id)
     elif msg.document:
@@ -905,9 +908,20 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("⚠️ Надішліть фото або PDF документа.")
         return UPLOAD
 
-    await msg.reply_text(
-        f"✅ Файл прийнято! Всього: *{len(files)}*",
-        parse_mode="Markdown", reply_markup=upload_kb())
+    ack_text = f"✅ Файлів отримано: {len(files)}"
+    ack_id   = ctx.user_data.get("ack_msg_id")
+
+    if ack_id:
+        try:
+            await ctx.bot.edit_message_text(
+                ack_text, chat_id=msg.chat_id,
+                message_id=ack_id, reply_markup=object_kb())
+            return UPLOAD
+        except Exception:
+            pass  # якщо редагування не вдалося — надсилаємо нове
+
+    sent = await msg.reply_text(ack_text, reply_markup=object_kb())
+    ctx.user_data["ack_msg_id"] = sent.message_id
     return UPLOAD
 
 
@@ -1025,7 +1039,7 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 INSERT INTO requests (user_id, request_type, status, comment)
                 VALUES ($1, $2, 'new', $3) RETURNING id
             """, u.id, name, full_comment or None)
-            await conn.close()
+            await _db_release(conn)
             logger.info(f"Заявку #{req_id} збережено в БД для user {u.id}")
         except Exception as e:
             logger.warning(f"DB insert request error: {e}")
@@ -1280,8 +1294,26 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 #  АДМІН-ПАНЕЛЬ
 # ══════════════════════════════════════════════════════════
 
+_db_pool = None
+
+async def _get_pool():
+    global _db_pool
+    if _db_pool is None and DATABASE_URL:
+        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    return _db_pool
+
 async def _db_connect():
+    pool = await _get_pool()
+    if pool:
+        return await pool.acquire()
     return await asyncpg.connect(DATABASE_URL)
+
+async def _db_release(conn):
+    pool = await _get_pool()
+    if pool and conn:
+        await pool.release(conn)
+    elif conn:
+        await _db_release(conn)
 
 
 async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1305,7 +1337,7 @@ async def _show_admin_home(msg_or_query, ctx):
             work_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='in_progress'")
             done_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='done'")
             all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
-            await conn.close()
+            await _db_release(conn)
             db_ok = True
         except Exception as e:
             logger.warning(f"Admin home DB error: {e}")
@@ -1403,7 +1435,7 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
                 FROM requests r JOIN users u ON r.user_id = u.user_id
                 ORDER BY r.created_at DESC LIMIT 20
             """)
-        await conn.close()
+        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1438,7 +1470,7 @@ async def _admin_view_request(q, req_id: int) -> int:
             FROM requests r JOIN users u ON r.user_id = u.user_id
             WHERE r.id = $1
         """, req_id)
-        await conn.close()
+        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1480,7 +1512,7 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
             WHERE r.id = $1
         """, req_id)
         await conn.execute("UPDATE requests SET status=$1 WHERE id=$2", new_status, req_id)
-        await conn.close()
+        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1527,7 +1559,7 @@ async def _admin_stats(q) -> int:
             "SELECT request_type, COUNT(*) as cnt FROM requests GROUP BY request_type ORDER BY cnt DESC")
         by_status = await conn.fetch(
             "SELECT status, COUNT(*) as cnt FROM requests GROUP BY status")
-        await conn.close()
+        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1563,7 +1595,7 @@ async def _admin_clients(q) -> int:
             GROUP BY u.user_id, u.full_name, u.phone, u.username, u.created_at
             ORDER BY u.created_at DESC LIMIT 20
         """)
-        await conn.close()
+        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1608,6 +1640,7 @@ async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _post_init(app):
     if DATABASE_URL:
+        await _get_pool()   # ініціалізуємо пул з'єднань
         await init_db()
 
 
