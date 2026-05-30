@@ -830,70 +830,97 @@ async def handle_photogps(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     u   = msg.from_user
     ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
 
+    # ── Отримали геолокацію ───────────────────────────────
     if msg.location:
         ctx.user_data["pgps_lat"] = msg.location.latitude
         ctx.user_data["pgps_lon"] = msg.location.longitude
+
+        # Якщо є збережене фото — обробляємо одразу
+        if "pgps_photo" in ctx.user_data:
+            photo_bytes = ctx.user_data.pop("pgps_photo")
+            lat = msg.location.latitude
+            lon = msg.location.longitude
+            await _process_and_send_photo(msg, u, ctx, photo_bytes, lat, lon, ts)
+            return PHOTOGPS
+
         await msg.reply_text(
             "✅ *GPS збережено!*\n\nТепер надішліть фото об'єкта.",
-            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardRemove())
         return PHOTOGPS
 
+    # ── Отримали фото ─────────────────────────────────────
     if msg.photo:
-        await msg.reply_text("⏳ Обробляю фото з геотегом...")
+        lat = ctx.user_data.get("pgps_lat")
+        lon = ctx.user_data.get("pgps_lon")
 
-        pfile       = await msg.photo[-1].get_file()
+        pfile = await msg.photo[-1].get_file()
         photo_bytes = bytes(await pfile.download_as_bytearray())
 
-        img_tmp     = Image.open(BytesIO(photo_bytes))
-        lat, lon    = _get_exif_gps(img_tmp)
-
+        # GPS ще не надіслано — зберігаємо фото і просимо геолокацію
         if lat is None:
-            lat = ctx.user_data.get("pgps_lat")
-            lon = ctx.user_data.get("pgps_lon")
+            ctx.user_data["pgps_photo"] = photo_bytes
+            await msg.reply_text(
+                "📍 *Фото отримано!*\n\n"
+                "Тепер натисніть кнопку нижче щоб передати своє місцезнаходження — "
+                "бот додасть координати, адресу та карту на фото.",
+                parse_mode="Markdown",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📍 Надіслати геолокацію об'єкта", request_location=True)]],
+                    one_time_keyboard=True, resize_keyboard=True))
+            return PHOTOGPS
 
-        address = await _get_address(lat, lon) if lat and lon else ""
-
-        processed = await build_geotagged_photo(photo_bytes, lat, lon, address, ts)
-
-        # Клієнту
-        processed.seek(0)
-        await msg.reply_photo(processed, caption="✅ Фото з геотегом *ОЦІНКА24*",
-                              parse_mode="Markdown")
-
-        # Адміну / каналу
-        caption = (
-            f"📸 *ФОТО+GPS ОБ'ЄКТА*\n"
-            f"{'─'*28}\n"
-            f"👤 *{u.full_name}*\n🆔 `{u.id}` | @{u.username or '—'}\n"
-            f"🕐 {ts}"
-        )
-        if lat and lon:
-            maps = f"https://maps.google.com/?q={lat},{lon}"
-            caption += f"\n📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})"
-        if address:
-            caption += f"\n📬 {address[:120]}"
-        caption += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
-
-        processed.seek(0)
-        await notify_photo(ctx, processed, caption)
-        if lat and lon:
-            await notify_loc(ctx, lat, lon)
-
-        ctx.user_data.pop("pgps_lat", None)
-        ctx.user_data.pop("pgps_lon", None)
-
-        await ctx.bot.send_message(msg.chat.id,
-            "Надішліть ще фото або поверніться в меню:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📸 Ще одне фото",  callback_data="photogps")],
-                [InlineKeyboardButton("🏠 Головне меню",  callback_data="home")],
-            ]))
+        await _process_and_send_photo(msg, u, ctx, photo_bytes, lat, lon, ts)
         return PHOTOGPS
 
     await msg.reply_text(
         "⚠️ Надішліть *фото* або спочатку *геолокацію* кнопкою.",
         parse_mode="Markdown")
     return PHOTOGPS
+
+
+async def _process_and_send_photo(msg, u, ctx, photo_bytes: bytes,
+                                   lat: float, lon: float, ts: str):
+    """Обробляє фото з GPS, надсилає клієнту і адмінам."""
+    await msg.reply_text("⏳ Обробляю фото, визначаю адресу...")
+
+    address = await _get_address(lat, lon)
+
+    processed = await build_geotagged_photo(photo_bytes, lat, lon, address, ts)
+
+    processed.seek(0)
+    await msg.reply_photo(
+        processed,
+        caption=f"✅ Фото з геотегом *ОЦІНКА24*\n📍 `{lat:.6f}, {lon:.6f}`",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove())
+
+    maps = f"https://maps.google.com/?q={lat},{lon}"
+    caption = (
+        f"📸 *ФОТО+GPS ОБ'ЄКТА*\n{'─'*28}\n"
+        f"👤 *{u.full_name}*\n🆔 `{u.id}` | @{u.username or '—'}\n"
+        f"🕐 {ts}\n"
+        f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})"
+    )
+    if address:
+        caption += f"\n📬 {address[:120]}"
+    caption += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
+
+    processed.seek(0)
+    await notify_photo(ctx, processed, caption)
+    await notify_loc(ctx, lat, lon)
+
+    ctx.user_data.pop("pgps_lat", None)
+    ctx.user_data.pop("pgps_lon", None)
+    ctx.user_data.pop("pgps_photo", None)
+
+    await ctx.bot.send_message(
+        msg.chat.id,
+        "Надішліть ще фото або поверніться в меню:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📸 Ще одне фото", callback_data="photogps")],
+            [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
+        ]))
 
 
 # ══════════════════════════════════════════════════════════
