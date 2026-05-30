@@ -239,23 +239,32 @@ _FONT_PATHS = [
 ]
 
 
-async def _ensure_cyrillic_font():
-    """Завантажує шрифт з підтримкою кирилиці якщо жоден не знайдено."""
-    for p in _FONT_PATHS[1:]:  # пропускаємо _FONT_FILE при перевірці
+def _ensure_cyrillic_font_sync():
+    """Завантажує шрифт з підтримкою кирилиці якщо жоден не знайдено (синхронно)."""
+    for p in _FONT_PATHS[1:]:
         if os.path.exists(p):
             logger.info(f"Шрифт знайдено: {p}")
             return
     if os.path.exists(_FONT_FILE):
         return
     logger.info("Завантажую шрифт з підтримкою кирилиці...")
-    url = "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf"
-    data = await _fetch_async(url)
-    if data:
-        with open(_FONT_FILE, "wb") as f:
-            f.write(data)
-        logger.info("✅ Шрифт Roboto-Bold завантажено")
-    else:
-        logger.warning("⚠️ Не вдалося завантажити шрифт — кирилиця може не відображатися")
+    import urllib.request
+    urls = [
+        "https://github.com/liberationfonts/liberation-fonts/raw/main/Liberation-fonts-ttf-2.1.5/LiberationSans-Bold.ttf",
+        "https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/5.3"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = r.read()
+            with open(_FONT_FILE, "wb") as f:
+                f.write(data)
+            logger.info(f"✅ Шрифт завантажено: {url.split('/')[-1]}")
+            return
+        except Exception as e:
+            logger.warning(f"Шрифт {url.split('/')[-1]}: {e}")
+    logger.warning("⚠️ Шрифт не завантажено — кирилиця може не відображатися")
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
@@ -1001,8 +1010,13 @@ async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Помилка: {ctx.error}", exc_info=ctx.error)
 
 
+async def _post_init(app):
+    if DATABASE_URL:
+        await init_db()
+
+
 def build():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
@@ -1042,6 +1056,7 @@ def build():
 
 
 def main():
+    _ensure_cyrillic_font_sync()
     logger.info("🚀 ОЦІНКА24 Bot v5.3 | Google Maps + Адмін-панель + БД")
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)}")
     logger.info(f"   Канал:    {'✅' if CHANNEL_ID else '—'}")
@@ -1051,9 +1066,4 @@ def main():
 
 
 if __name__ == "__main__":
-    async def _startup():
-        if DATABASE_URL:
-            await init_db()
-        await _ensure_cyrillic_font()
-    asyncio.run(_startup())
     main()
