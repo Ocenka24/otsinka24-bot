@@ -39,7 +39,12 @@ CHANNEL_ID         = int(os.getenv("CHANNEL_ID", "0"))
 DATABASE_URL       = os.getenv("DATABASE_URL")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
-gmaps = _googlemaps.Client(key=GOOGLE_MAPS_API_KEY) if (_gmaps_available and GOOGLE_MAPS_API_KEY) else None
+gmaps = None
+if _gmaps_available and GOOGLE_MAPS_API_KEY:
+    try:
+        gmaps = _googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+    except Exception as _e:
+        logging.warning(f"Google Maps Client init failed: {_e} — геокодування через Nominatim")
 
 WEBSITE = "https://ocenka24.com.ua/"
 EMAIL   = "info@ocenka24.com.ua"
