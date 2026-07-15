@@ -263,6 +263,21 @@ async def _save_user(user_id: int, username: str, full_name: str, phone: str):
             await _db_release(conn)
 
 
+async def _get_saved_phone(user_id: int) -> str | None:
+    """Повертає збережений телефон клієнта з БД (щоб не питати повторно)."""
+    if not DATABASE_URL:
+        return None
+    conn = None
+    try:
+        conn = await _db_connect()
+        return await conn.fetchval("SELECT phone FROM users WHERE user_id=$1", user_id)
+    except Exception:
+        return None
+    finally:
+        if conn:
+            await _db_release(conn)
+
+
 async def _log_security(user_id: int, event: str, details: str = ""):
     if not DATABASE_URL:
         return
@@ -316,18 +331,73 @@ OBJECTS = {
     ], 2500, "за домовленістю"),
 }
 
+# ── Ціни залежно від мети ─────────────────────────────────
+_PRICES: dict[tuple[str, str], tuple[str, str]] = {
+    # (об'єкт, мета): (ціна, строк)
+    ("car",    "sale"):  ("1 500 грн",        "1 день"),
+    ("car",    "court"): ("2 000–3 000 грн",  "1 день"),
+    ("car",    "bank"):  ("1 500 грн",        "1 день"),
+    ("car",    "other"): ("1 500 грн",        "1 день"),
+    ("flat",   "sale"):  ("1 600 грн",        "1 день"),
+    ("flat",   "court"): ("2 500 грн",        "1 день"),
+    ("flat",   "bank"):  ("1 600 грн",        "1 день"),
+    ("flat",   "other"): ("1 600 грн",        "1 день"),
+    ("house",  "sale"):  ("1 600 грн",        "1 день"),
+    ("house",  "court"): ("2 500 грн",        "1 день"),
+    ("house",  "bank"):  ("1 600 грн",        "1 день"),
+    ("house",  "other"): ("1 600 грн",        "1 день"),
+    ("land",   "sale"):  ("1 500 грн",        "1 день"),
+    ("land",   "court"): ("2 500 грн",        "1 день"),
+    ("land",   "bank"):  ("1 500 грн",        "1 день"),
+    ("land",   "other"): ("1 500 грн",        "1 день"),
+    ("nonres", "sale"):  ("від 2 500 грн",    "за домовленістю"),
+    ("nonres", "court"): ("від 4 000 грн",    "2–3 дні"),
+    ("nonres", "bank"):  ("від 2 500 грн",    "за домовленістю"),
+    ("nonres", "other"): ("від 2 500 грн",    "за домовленістю"),
+}
+
+_PURPOSE_LABELS: dict[str, str] = {
+    "sale":  "🏷 Купівля-продаж",
+    "court": "⚖️ Для суду",
+    "bank":  "🏦 Для банку / іпотеки",
+    "other": "📋 Інша мета",
+}
+
+
+def _get_price(obj_key: str, purpose: str) -> tuple[str, str]:
+    return _PRICES.get((obj_key, purpose), _PRICES.get((obj_key, "sale"), ("—", "—")))
+
+
+def _purpose_kb(obj_key: str) -> InlineKeyboardMarkup:
+    """Клавіатура вибору мети оцінки."""
+    rows = [
+        [InlineKeyboardButton("🏷 Купівля-продаж",    callback_data=f"purpose|sale|{obj_key}")],
+        [InlineKeyboardButton("⚖️ Для суду",          callback_data=f"purpose|court|{obj_key}")],
+        [InlineKeyboardButton("🏦 Для банку / іпотеки", callback_data=f"purpose|bank|{obj_key}")],
+        [InlineKeyboardButton("📋 Інша мета",         callback_data=f"purpose|other|{obj_key}")],
+        [InlineKeyboardButton("◀️ Назад",             callback_data="home")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 _PRICES_TEXT = (
     "💰 *Вартість оцінки ОЦІНКА24*\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "🚗 Транспортний засіб — *1 500 грн* / 1 день\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "🏷 *Купівля-продаж / банк / іпотека:*\n"
+    "🚗 Авто — *1 500 грн* / 1 день\n"
     "🏠 Квартира — *1 600 грн* / 1 день\n"
     "🏡 Будинок — *1 600 грн* / 1 день\n"
-    "🌿 Земельна ділянка — *1 500 грн* / 1 день\n"
-    "🏭 Нежитлова нерухомість — *від 2 500 грн*\n"
+    "🌿 Земля — *1 500 грн* / 1 день\n"
+    "🏭 Нежитлова — *від 2 500 грн*\n\n"
+    "⚖️ *Для суду:*\n"
+    "🚗 Авто — *2 000–3 000 грн* / 1 день\n"
+    "🏠 Квартира — *2 500 грн* / 1 день\n"
+    "🏡 Будинок — *2 500 грн* / 1 день\n"
+    "🌿 Земля — *2 500 грн* / 1 день\n"
+    "🏭 Нежитлова — *від 4 000 грн* / 2–3 дні\n"
     "━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "📦 Звіт надсилається Новою Поштою або електронно\n"
-    "🎯 Для банку, нотаріуса, суду, страховки, органів опіки\n\n"
-    f"📞 Уточнити вартість: {'+38 (050) 3000-173'}\n"
+    "📦 Звіт надсилається Новою Поштою або електронно\n\n"
+    f"📞 Уточнити: {'+38 (050) 3000-173'}\n"
     f"🌐 ocenka24.com.ua"
 )
 
@@ -471,17 +541,28 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 ЩО ТИ ВМІЄШ (відповідай на ВСЕ це сам):
 — Пояснити навіщо потрібна оцінка (для банку, нотаріуса, продажу, страховки, суду, спадщини, розлучення, органів опіки, митниці)
 — Розповісти які документи потрібні для кожного виду оцінки
-— Назвати вартість та строки виконання
+— Назвати вартість та строки виконання (ОБОВ'ЯЗКОВО запитай мету перш ніж називати ціну)
 — Пояснити як відбувається процес оцінки
 — Допомогти визначити який вид оцінки потрібен
 — Відповісти на будь-які питання про оцінку майна
 
-ПРАЙС-ЛИСТ (використовуй ТІЛЬКИ ці ціни):
-🚗 Оцінка авто — 1 500 грн, термін 1 день
-🏠 Оцінка квартири — 1 600 грн, термін 1 день
-🏡 Оцінка будинку — 1 600 грн, термін 1 день
-🌿 Оцінка землі — 1 500 грн, термін 1 день
-🏭 Нежитлова нерухомість — від 2 500 грн, термін за домовленістю
+ВАЖЛИВО ПРО ЦІНИ: Якщо клієнт питає ціну — СПОЧАТКУ запитай мету оцінки (продаж, суд, банк, страховка тощо), бо від цього залежить вартість. Оцінка для суду дорожча ніж для продажу.
+
+ПРАЙС-ЛИСТ (ціни ЗАЛЕЖАТЬ ВІД МЕТИ — завжди питай мету перш ніж називати ціну):
+
+Для КУПІВЛІ-ПРОДАЖУ / БАНКУ / ІПОТЕКИ:
+🚗 Авто — 1 500 грн / 1 день
+🏠 Квартира — 1 600 грн / 1 день
+🏡 Будинок — 1 600 грн / 1 день
+🌿 Земля — 1 500 грн / 1 день
+🏭 Нежитлова нерухомість — від 2 500 грн
+
+Для СУДУ:
+🚗 Авто — 2 000–3 000 грн / 1 день
+🏠 Квартира — 2 500 грн / 1 день
+🏡 Будинок — 2 500 грн / 1 день
+🌿 Земля — 2 500 грн / 1 день
+🏭 Нежитлова нерухомість — від 4 000 грн / 2–3 дні
 
 ДОКУМЕНТИ ДЛЯ ОЦІНКИ АВТО: техпаспорт, паспорт власника, фото авто з 4 сторін, фото салону та VIN-коду.
 ДОКУМЕНТИ ДЛЯ КВАРТИРИ: правовстановлюючий документ, технічний паспорт, паспорт, фото кімнат.
@@ -627,14 +708,25 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return AI_CHAT
 
 
-async def _open_object_by_key(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> int:
-    icon, name, docs, price, term = OBJECTS[key]
-    ctx.user_data.update({"obj_key": key, "obj_name": f"{icon} {name}", "files": []})
+async def _open_object_by_key(upd: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                              key: str, purpose: str = "") -> int:
+    icon, name, docs, _base_price, _base_term = OBJECTS[key]
+    purpose = purpose or ctx.user_data.get("eval_purpose", "sale")
+    price_str, term = _get_price(key, purpose)
+    purpose_label = _PURPOSE_LABELS.get(purpose, "")
+
+    ctx.user_data.update({
+        "obj_key":      key,
+        "obj_name":     f"{icon} {name}",
+        "eval_purpose": purpose,
+        "files":        [],
+    })
     doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
     await ctx.bot.send_message(
         upd.effective_chat.id,
         f"{icon} *{name}*\n"
-        f"💰 Вартість: *{price:,} грн* | Строк: *{term}*\n\n"
+        f"🎯 Мета: {purpose_label}\n"
+        f"💰 Вартість: *{price_str}* | Строк: *{term}*\n\n"
         f"📋 *Необхідні документи:*\n{doc_list}\n\n"
         "Надсилайте фото та документи по одному.\n"
         "Після завершення натисніть *«✅ Завершити»*.",
@@ -654,6 +746,13 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await (upd.message or upd.callback_query.message).reply_text(
             "⛔ Ваш акаунт заблоковано.")
         return MENU
+
+    # Відновлюємо телефон з БД якщо в пам'яті немає
+    if not ctx.user_data.get("phone"):
+        saved = await _get_saved_phone(u.id)
+        if saved:
+            ctx.user_data["phone"] = saved
+            logger.info(f"Телефон відновлено з БД для {u.id}: {saved}")
 
     name = (u.first_name or "").strip() or "Друже"
     has_phone = bool(ctx.user_data.get("phone"))
@@ -728,8 +827,9 @@ async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=ReplyKeyboardRemove())
 
     pending = ctx.user_data.pop("pending_obj", None)
+    pending_purpose = ctx.user_data.pop("pending_purpose", "sale")
     if pending and pending in OBJECTS:
-        return await _open_object_by_key(upd, ctx, pending)
+        return await _open_object_by_key(upd, ctx, pending, pending_purpose)
 
     await ctx.bot.send_message(upd.effective_chat.id, "🏠 Головне меню:", reply_markup=main_kb())
     return MENU
@@ -898,6 +998,30 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if d == "done":
         return await finish_upload(upd, ctx)
 
+    # Вибір мети оцінки
+    if d.startswith("purpose|"):
+        _, purpose, obj_key = d.split("|", 2)
+        if not ctx.user_data.get("phone"):
+            ctx.user_data["pending_obj"]     = obj_key
+            ctx.user_data["pending_purpose"] = purpose
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await ctx.bot.send_message(
+                upd.effective_chat.id,
+                "📱 *Для замовлення оцінки* вкажіть номер телефону:",
+                parse_mode="Markdown",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📱 Поділитися номером", request_contact=True)]],
+                    one_time_keyboard=True, resize_keyboard=True))
+            return PHONE
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return await _open_object_by_key(upd, ctx, obj_key, purpose)
+
     key = d.replace("obj_", "")
     if key in OBJECTS:
         if not ctx.user_data.get("phone"):
@@ -914,7 +1038,20 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     one_time_keyboard=True, resize_keyboard=True))
             ctx.user_data["pending_obj"] = key
             return PHONE
-        return await _open_object_by_key(upd, ctx, key)
+        # Спочатку запитуємо мету оцінки
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        icon, name, _, _, _ = OBJECTS[key]
+        await ctx.bot.send_message(
+            upd.effective_chat.id,
+            f"{icon} *{name}*\n\n"
+            "🎯 *Вкажіть мету оцінки*\n"
+            "_(від мети залежить вартість та вид звіту)_",
+            parse_mode="Markdown",
+            reply_markup=_purpose_kb(key))
+        return MENU
 
     return MENU
 
@@ -1589,18 +1726,20 @@ async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return MENU
 
     code = _gen_2fa(u.id)
-    ts   = datetime.now().strftime("%H:%M:%S")
+    ts   = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     await upd.message.reply_text(
-        f"🔐 *Підтвердження входу в адмін-панель*\n\n"
-        f"Час запиту: `{ts}`\n"
-        f"Натисніть кнопку нижче щоб увійти.\n\n"
+        f"🔐 *Підтвердження входу — ОЦІНКА24 Адмін*\n\n"
+        f"👤 User ID: `{u.id}`\n"
+        f"🕐 Час запиту: `{ts}`\n\n"
+        f"Натисніть кнопку щоб увійти.\n"
         f"⏱ Кнопка дійсна 5 хвилин.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Підтвердити вхід в адмін-панель",
-                                 callback_data=f"2fa|{code}")
+            InlineKeyboardButton(
+                f"✅ Підтвердити вхід (ID: {u.id})",
+                callback_data=f"2fa|{u.id}|{code}")
         ]]))
-    await _log_security(u.id, "ADMIN_2FA_SENT", "")
+    await _log_security(u.id, "ADMIN_2FA_SENT", f"ts={ts}")
     return ADMIN_2FA
 
 
@@ -1609,11 +1748,21 @@ async def handle_admin_2fa_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     u = q.from_user
 
-    if u.id not in ADMIN_IDS:
-        await q.answer("⛔ Доступ заборонено", show_alert=True)
+    parts = q.data.split("|")          # ["2fa", user_id, code]
+    if len(parts) != 3:
+        await q.edit_message_text("⚠️ Невірний формат запиту. Введіть /admin знову.")
         return MENU
 
-    code = q.data.split("|", 1)[1] if "|" in q.data else ""
+    claimed_uid = int(parts[1])
+    code        = parts[2]
+
+    # Перевірка: той хто натискає = той хто запросив = адмін
+    if u.id not in ADMIN_IDS or u.id != claimed_uid:
+        await _log_security(u.id, "ADMIN_2FA_WRONG_USER",
+                            f"claimed={claimed_uid}, actual={u.id}")
+        await q.answer("⛔ Доступ заборонено — невідповідність User ID", show_alert=True)
+        return MENU
+
     if _verify_2fa(u.id, code):
         await _log_security(u.id, "ADMIN_2FA_OK", "")
         await _show_admin_home(q, ctx)
@@ -2309,7 +2458,7 @@ def build():
                 CallbackQueryHandler(on_menu),
             ],
             ADMIN: [
-                CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|)"),
+                CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|[0-9])"),
                 CallbackQueryHandler(on_menu, pattern="^home$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text),
             ],
@@ -2329,7 +2478,7 @@ def build():
     # Хендлери поза ConversationHandler (завжди активні)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|[0-9])"))
     app.add_error_handler(err_handler)
     return app
 
