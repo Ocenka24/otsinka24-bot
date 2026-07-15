@@ -175,11 +175,11 @@ async def init_db():
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                user_id   BIGINT PRIMARY KEY,
-                username  TEXT,
-                full_name TEXT,
-                phone     TEXT,
-                is_banned BOOLEAN DEFAULT FALSE,
+                user_id    BIGINT PRIMARY KEY,
+                username   TEXT,
+                full_name  TEXT,
+                phone      TEXT,
+                is_banned  BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS requests (
@@ -191,14 +191,27 @@ async def init_db():
                 lat          DOUBLE PRECISION,
                 lon          DOUBLE PRECISION,
                 comment      TEXT,
+                delivery     TEXT,
+                admin_notes  TEXT,
+                report_ready BOOLEAN DEFAULT FALSE,
+                deadline     TEXT,
                 ai_summary   TEXT,
-                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                files_count  INTEGER DEFAULT 0,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS request_files (
                 id         SERIAL PRIMARY KEY,
                 request_id INTEGER REFERENCES requests(id),
                 file_id    TEXT NOT NULL,
                 file_type  TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS request_messages (
+                id         SERIAL PRIMARY KEY,
+                request_id INTEGER REFERENCES requests(id),
+                sender     TEXT NOT NULL,
+                message    TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS security_log (
@@ -209,6 +222,20 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
+        # Міграція — додаємо нові колонки якщо їх ще немає
+        for col, definition in [
+            ("delivery",     "TEXT"),
+            ("admin_notes",  "TEXT"),
+            ("report_ready", "BOOLEAN DEFAULT FALSE"),
+            ("deadline",     "TEXT"),
+            ("files_count",  "INTEGER DEFAULT 0"),
+            ("updated_at",   "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+        ]:
+            try:
+                await conn.execute(
+                    f"ALTER TABLE requests ADD COLUMN IF NOT EXISTS {col} {definition}")
+            except Exception:
+                pass
         logger.info("✅ База даних ініціалізована")
     except Exception as e:
         logger.error(f"init_db error: {e}")
@@ -437,35 +464,53 @@ async def notify_loc(ctx, lat: float, lon: float):
 #  AI-КОНСУЛЬТАНТ (Gemini)
 # ══════════════════════════════════════════════════════════
 
-_AI_SYSTEM_PROMPT = f"""Ти — AI-консультант компанії ОЦІНКА24, що надає послуги незалежної оцінки майна в Україні.
+_AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦІНКА24, яка надає послуги незалежної оцінки майна в Україні.
 
-ТВОЇ ЗАВДАННЯ (виконуй поетапно):
-1. Привітайся та з'ясуй мету оцінки (продаж, банк, нотаріус, страховка, суд, спадщина тощо)
-2. Визнач вид об'єкта (авто, квартира, будинок, земля, нежитлова нерухомість)
-3. Уточни характеристики об'єкта (марка/модель/рік для авто; площа/поверх/адреса для нерухомості)
-4. Назви орієнтовну вартість та строк
-5. Запропонуй зручний спосіб замовлення
+ВАЖЛИВО: Ти ПОВИНЕН відповідати на питання клієнта самостійно. Переводити до менеджера ТІЛЬКИ у крайньому випадку.
 
-ПРАЙС-ЛИСТ:
-🚗 Транспортний засіб — 1 500 грн / 1 день
-🏠 Квартира — 1 600 грн / 1 день
-🏡 Будинок — 1 600 грн / 1 день
-🌿 Земельна ділянка — 1 500 грн / 1 день
-🏭 Нежитлова нерухомість — від 2 500 грн
+ЩО ТИ ВМІЄШ (відповідай на ВСЕ це сам):
+— Пояснити навіщо потрібна оцінка (для банку, нотаріуса, продажу, страховки, суду, спадщини, розлучення, органів опіки, митниці)
+— Розповісти які документи потрібні для кожного виду оцінки
+— Назвати вартість та строки виконання
+— Пояснити як відбувається процес оцінки
+— Допомогти визначити який вид оцінки потрібен
+— Відповісти на будь-які питання про оцінку майна
 
-КОНТАКТИ:
-Телефон: +38 (050) 3000-173
+ПРАЙС-ЛИСТ (використовуй ТІЛЬКИ ці ціни):
+🚗 Оцінка авто — 1 500 грн, термін 1 день
+🏠 Оцінка квартири — 1 600 грн, термін 1 день
+🏡 Оцінка будинку — 1 600 грн, термін 1 день
+🌿 Оцінка землі — 1 500 грн, термін 1 день
+🏭 Нежитлова нерухомість — від 2 500 грн, термін за домовленістю
+
+ДОКУМЕНТИ ДЛЯ ОЦІНКИ АВТО: техпаспорт, паспорт власника, фото авто з 4 сторін, фото салону та VIN-коду.
+ДОКУМЕНТИ ДЛЯ КВАРТИРИ: правовстановлюючий документ, технічний паспорт, паспорт, фото кімнат.
+ДОКУМЕНТИ ДЛЯ БУДИНКУ: документи на будинок і землю, технічний паспорт, паспорт, фото.
+ДОКУМЕНТИ ДЛЯ ЗЕМЛІ: документ на землю, паспорт, фото ділянки.
+ДОКУМЕНТИ ДЛЯ НЕЖИТЛОВОЇ: правовстановлюючий документ, техпаспорт, документи юрособи/паспорт, фото.
+
+КОНТАКТИ ОЦІНКА24:
+Телефон: +38 (050) 3000-173 (Пн-Пт 09:00-18:00, Сб 09:00-14:00)
 Сайт: ocenka24.com.ua
-Режим роботи: Пн-Пт 09:00-18:00, Сб 09:00-14:00
 
-ПРАВИЛА:
-- Спілкуйся ТІЛЬКИ українською мовою
-- Будь лаконічним (не більше 4-5 речень у відповіді)
-- Не вигадуй ціни — використовуй тільки прайс вище
-- Якщо питання юридичне або складне — відповідай "ESCALATE" на початку
-- Якщо клієнт хоче замовити — відповідай "ORDER:[тип]" де тип: car/flat/house/land/nonres
-- Після збору інформації запропонуй надіслати документи через бота
-"""
+КОЛИ ПИСАТИ "ESCALATE" (ТІЛЬКИ у таких випадках):
+— Клієнт явно незадоволений і просить людину
+— Питання про конкретну судову справу з деталями
+— Клієнт питає про послугу якої немає в прайсі (оцінка бізнесу, збитки від війни тощо)
+
+КОЛИ ПИСАТИ "ORDER:тип" (після того як клієнт сказав що хоче замовити):
+— ORDER:car — оцінка авто
+— ORDER:flat — оцінка квартири
+— ORDER:house — оцінка будинку
+— ORDER:land — оцінка землі
+— ORDER:nonres — нежитлова нерухомість
+
+ПРАВИЛА ВІДПОВІДЕЙ:
+— Мова: ТІЛЬКИ українська
+— Довжина: 3-5 речень, конкретно і по суті
+— НЕ починай відповідь з "ESCALATE" якщо можеш відповісти сам
+— Якщо не знаєш точну відповідь — дай загальну інформацію та запропонуй уточнити по телефону
+— Будь доброзичливим та корисним"""
 
 
 async def _ask_gemini(history: list[dict], user_msg: str) -> str:
@@ -1026,13 +1071,17 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ON CONFLICT (user_id) DO UPDATE
                   SET username=$2, full_name=$3, phone=COALESCE($4, users.phone)
             """, u.id, u.username, u.full_name, phone if phone != "—" else None)
-            full_comment = comment
-            if delivery:
-                full_comment += ("\n\n" if full_comment else "") + f"Нова Пошта: {delivery}"
             req_id = await conn.fetchval("""
-                INSERT INTO requests (user_id, request_type, status, comment, ai_summary)
-                VALUES ($1,$2,'new',$3,$4) RETURNING id
-            """, u.id, name, full_comment or None, ai_sum or None)
+                INSERT INTO requests
+                  (user_id, request_type, status, comment, delivery, ai_summary, files_count)
+                VALUES ($1,$2,'new',$3,$4,$5,$6) RETURNING id
+            """, u.id, name, comment or None, delivery or None,
+                ai_sum or None, len(files))
+            # Зберігаємо file_ids
+            for fid in files:
+                await conn.execute(
+                    "INSERT INTO request_files (request_id, file_id, file_type) VALUES ($1,$2,$3)",
+                    req_id, fid, "photo")
         except Exception as e:
             logger.warning(f"DB insert request: {e}")
         finally:
@@ -1540,33 +1589,39 @@ async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return MENU
 
     code = _gen_2fa(u.id)
+    ts   = datetime.now().strftime("%H:%M:%S")
     await upd.message.reply_text(
-        f"🔐 *Двофакторна аутентифікація*\n\n"
-        f"Введіть код підтвердження:\n`{code}`\n\n"
-        f"⏱ Код дійсний 5 хвилин.",
-        parse_mode="Markdown")
+        f"🔐 *Підтвердження входу в адмін-панель*\n\n"
+        f"Час запиту: `{ts}`\n"
+        f"Натисніть кнопку нижче щоб увійти.\n\n"
+        f"⏱ Кнопка дійсна 5 хвилин.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Підтвердити вхід в адмін-панель",
+                                 callback_data=f"2fa|{code}")
+        ]]))
     await _log_security(u.id, "ADMIN_2FA_SENT", "")
     return ADMIN_2FA
 
 
-async def handle_admin_2fa(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = upd.message
-    u   = msg.from_user
+async def handle_admin_2fa_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = upd.callback_query
+    await q.answer()
+    u = q.from_user
 
     if u.id not in ADMIN_IDS:
+        await q.answer("⛔ Доступ заборонено", show_alert=True)
         return MENU
 
-    code_input = msg.text.strip() if msg.text else ""
-
-    if _verify_2fa(u.id, code_input):
+    code = q.data.split("|", 1)[1] if "|" in q.data else ""
+    if _verify_2fa(u.id, code):
         await _log_security(u.id, "ADMIN_2FA_OK", "")
-        await _show_admin_home(msg, ctx)
+        await _show_admin_home(q, ctx)
         return ADMIN
     else:
-        await _log_security(u.id, "ADMIN_2FA_FAIL", code_input[:10])
-        await msg.reply_text(
-            "❌ Невірний або застарілий код.\n\n"
-            "Введіть /admin щоб отримати новий код.")
+        await _log_security(u.id, "ADMIN_2FA_EXPIRED", "")
+        await q.edit_message_text(
+            "⏱ Час дії кнопки минув.\n\nВведіть /admin щоб отримати новий запит.")
         return MENU
 
 
@@ -1630,6 +1685,10 @@ async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     data = q.data
 
+    # 2FA підтвердження
+    if data.startswith("2fa|"):
+        return await handle_admin_2fa_callback(upd, ctx)
+
     if data == "adm|home":
         await _show_admin_home(q, ctx)
         return ADMIN
@@ -1654,6 +1713,42 @@ async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                                   reply_markup=InlineKeyboardMarkup([[
                                       InlineKeyboardButton("← Назад", callback_data="adm|bans")
                                   ]]))
+        return ADMIN
+    if data.startswith("adm|report|"):
+        req_id = int(data.split("|")[2])
+        return await _admin_toggle_report(q, req_id)
+    if data.startswith("adm|note|"):
+        req_id = int(data.split("|")[2])
+        ctx.user_data["crm_note_req_id"] = req_id
+        await q.edit_message_text(
+            f"📝 *Нотатка до заявки #{req_id}*\n\n"
+            "Введіть нотатку (наприклад: «Клієнт передзвонить у вівторок»):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Скасувати", callback_data=f"adm|view|{req_id}")
+            ]]))
+        return ADMIN
+    if data.startswith("adm|deadline|"):
+        req_id = int(data.split("|")[2])
+        ctx.user_data["crm_deadline_req_id"] = req_id
+        await q.edit_message_text(
+            f"📅 *Дедлайн для заявки #{req_id}*\n\n"
+            "Введіть дату виконання (наприклад: «25.07.2026» або «до п'ятниці»):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Скасувати", callback_data=f"adm|view|{req_id}")
+            ]]))
+        return ADMIN
+    if data.startswith("adm|msg|"):
+        req_id = int(data.split("|")[2])
+        ctx.user_data["crm_msg_req_id"] = req_id
+        await q.edit_message_text(
+            f"📨 *Повідомлення клієнту (заявка #{req_id})*\n\n"
+            "Введіть текст повідомлення:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Скасувати", callback_data=f"adm|view|{req_id}")
+            ]]))
         return ADMIN
     if data.startswith("st|"):
         _, req_id, new_status = data.split("|")
@@ -1715,9 +1810,30 @@ async def _admin_list(q, status_filter, title):
     return ADMIN
 
 
+def _crm_kb(req_id: int) -> InlineKeyboardMarkup:
+    """Повна CRM-клавіатура для заявки."""
+    return InlineKeyboardMarkup([
+        # Статуси
+        [InlineKeyboardButton("🆕 Нова",       callback_data=f"st|{req_id}|new"),
+         InlineKeyboardButton("🔄 В роботі",   callback_data=f"st|{req_id}|in_progress")],
+        [InlineKeyboardButton("✅ Виконано",    callback_data=f"st|{req_id}|done"),
+         InlineKeyboardButton("❌ Відхилено",   callback_data=f"st|{req_id}|rejected")],
+        # Дії
+        [InlineKeyboardButton("📝 Додати нотатку", callback_data=f"adm|note|{req_id}"),
+         InlineKeyboardButton("📅 Дедлайн",        callback_data=f"adm|deadline|{req_id}")],
+        [InlineKeyboardButton("✅ Звіт готовий",    callback_data=f"adm|report|{req_id}"),
+         InlineKeyboardButton("📨 Написати клієнту", callback_data=f"adm|msg|{req_id}")],
+        # Навігація
+        [InlineKeyboardButton("← До списку",    callback_data="adm|active"),
+         InlineKeyboardButton("🏠 Адмін-меню",  callback_data="adm|home")],
+    ])
+
+
 async def _admin_view_request(q, req_id: int) -> int:
     conn = None
     req  = None
+    files_count = 0
+    messages = []
     try:
         conn = await _db_connect()
         req = await conn.fetchrow("""
@@ -1725,6 +1841,14 @@ async def _admin_view_request(q, req_id: int) -> int:
             FROM requests r JOIN users u ON r.user_id = u.user_id
             WHERE r.id=$1
         """, req_id)
+        if req:
+            files_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM request_files WHERE request_id=$1", req_id) or 0
+            messages = await conn.fetch("""
+                SELECT sender, message, created_at
+                FROM request_messages WHERE request_id=$1
+                ORDER BY created_at DESC LIMIT 5
+            """, req_id)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1737,26 +1861,69 @@ async def _admin_view_request(q, req_id: int) -> int:
         return ADMIN
 
     status_label = _STATUS_LABELS.get(req["status"], req["status"])
-    maps_link = (f"\n🗺 [Google Maps](https://maps.google.com/?q={req['lat']},{req['lon']})"
-                 if req["lat"] and req["lon"] else "")
-    ai_block = f"\n\n🤖 *AI-резюме:*\n{req['ai_summary'][:300]}" if req.get("ai_summary") else ""
+    report_icon  = "✅ ГОТОВИЙ" if req.get("report_ready") else "⏳ в роботі"
+    maps_link    = ""
+    if req.get("lat") and req.get("lon"):
+        maps_link = f" [🗺 Карта](https://maps.google.com/?q={req['lat']},{req['lon']})"
 
+    # Основна інформація
     text = (
-        f"📋 *Заявка #{req['id']}*\n{'─' * 24}\n"
-        f"📌 Тип: *{req['request_type']}*\n"
-        f"🏷 Статус: *{status_label}*\n"
-        f"👤 {req['full_name']}\n"
+        f"📋 *ЗАЯВКА #{req['id']}*\n"
+        f"{'━' * 28}\n"
+        f"📌 *{req['request_type']}*\n"
+        f"🏷 Статус: {status_label}\n"
+        f"📑 Звіт: *{report_icon}*\n"
+    )
+    if req.get("deadline"):
+        text += f"📅 Дедлайн: *{req['deadline']}*\n"
+    text += (
+        f"{'─' * 28}\n"
+        f"👤 *Клієнт:* {req['full_name']}\n"
         f"📱 `{req['phone'] or '—'}`\n"
         f"🆔 @{req['username'] or '—'} | `{req['user_id']}`\n"
-        f"📬 {req['address'] or '—'}\n"
-        f"📍 `{req['lat']}, {req['lon']}`{maps_link}\n"
-        f"🕐 {req['created_at'].strftime('%d.%m.%Y %H:%M') if req['created_at'] else '—'}"
-        f"{ai_block}\n\n"
-        f"[✉️ Написати клієнту](tg://user?id={req['user_id']})"
     )
-    await q.edit_message_text(text, parse_mode="Markdown",
-                              reply_markup=_status_kb(req_id),
-                              disable_web_page_preview=True)
+    if req.get("address"):
+        text += f"📬 {req['address'][:100]}{maps_link}\n"
+    elif maps_link:
+        text += f"📍 GPS{maps_link}\n"
+    text += (
+        f"{'─' * 28}\n"
+        f"📎 Файлів: *{files_count}*\n"
+        f"🕐 Створено: {req['created_at'].strftime('%d.%m.%Y %H:%M') if req.get('created_at') else '—'}\n"
+    )
+    if req.get("updated_at") and req.get("updated_at") != req.get("created_at"):
+        text += f"🔄 Оновлено: {req['updated_at'].strftime('%d.%m.%Y %H:%M')}\n"
+
+    # Опис від клієнта
+    if req.get("comment"):
+        text += f"{'─' * 28}\n📝 *Опис:*\n{req['comment'][:300]}\n"
+
+    # Нова Пошта
+    if req.get("delivery"):
+        text += f"{'─' * 28}\n📦 *Нова Пошта:*\n{req['delivery'][:200]}\n"
+
+    # Нотатки адміна
+    if req.get("admin_notes"):
+        text += f"{'─' * 28}\n🔖 *Нотатки адміна:*\n{req['admin_notes'][:300]}\n"
+
+    # AI-резюме
+    if req.get("ai_summary"):
+        text += f"{'─' * 28}\n🤖 *AI-резюме:*\n{req['ai_summary'][:250]}\n"
+
+    # Останні повідомлення
+    if messages:
+        text += f"{'─' * 28}\n💬 *Останні повідомлення:*\n"
+        for m in reversed(messages):
+            sender_icon = "👨‍💼" if m["sender"] == "admin" else "👤"
+            dt = m["created_at"].strftime("%d.%m %H:%M")
+            text += f"{sender_icon} [{dt}] {m['message'][:80]}\n"
+
+    text += f"\n[✉️ Написати клієнту](tg://user?id={req['user_id']})"
+
+    await q.edit_message_text(
+        text, parse_mode="Markdown",
+        reply_markup=_crm_kb(req_id),
+        disable_web_page_preview=True)
     return ADMIN
 
 
@@ -1770,7 +1937,12 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
             FROM requests r JOIN users u ON r.user_id = u.user_id
             WHERE r.id=$1
         """, req_id)
-        await conn.execute("UPDATE requests SET status=$1 WHERE id=$2", new_status, req_id)
+        await conn.execute(
+            "UPDATE requests SET status=$1, updated_at=NOW() WHERE id=$2",
+            new_status, req_id)
+        await conn.execute(
+            "INSERT INTO request_messages (request_id, sender, message) VALUES ($1,$2,$3)",
+            req_id, "system", f"Статус змінено → {_STATUS_LABELS.get(new_status, new_status)}")
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1779,29 +1951,51 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
             await _db_release(conn)
 
     label = _STATUS_LABELS.get(new_status, new_status)
-    await q.edit_message_text(
-        f"✅ Заявка *#{req_id}* → {label}", parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("← До заявки",   callback_data=f"adm|view|{req_id}")],
-            [InlineKeyboardButton("📋 До списку",  callback_data="adm|active")],
-            [InlineKeyboardButton("🏠 Адмін-меню", callback_data="adm|home")],
-        ]))
+    await q.answer(f"✅ Статус → {label}")
 
-    status_msgs = {
-        "done":        "✅ Ваша заявка *виконана*! Очікуйте звіт.",
-        "in_progress": "🔄 Вашу заявку *прийнято в роботу*. Незабаром зв'яжемось.",
-        "rejected":    "❌ Вашу заявку *відхилено*. Для уточнень зверніться до менеджера.",
-        "new":         "🆕 Вашу заявку *повернуто* в чергу.",
-    }
-    if req and new_status in status_msgs:
+    # Оновлюємо відображення картки заразом
+    return await _admin_view_request(q, req_id)
+
+
+async def _admin_toggle_report(q, req_id: int) -> int:
+    conn = None
+    try:
+        conn = await _db_connect()
+        current = await conn.fetchval("SELECT report_ready FROM requests WHERE id=$1", req_id)
+        new_val = not current
+        await conn.execute(
+            "UPDATE requests SET report_ready=$1, updated_at=NOW() WHERE id=$2",
+            new_val, req_id)
+        if new_val:
+            req = await conn.fetchrow(
+                "SELECT r.user_id, r.request_type FROM requests r WHERE r.id=$1", req_id)
+            await conn.execute(
+                "INSERT INTO request_messages (request_id, sender, message) VALUES ($1,$2,$3)",
+                req_id, "system", "Звіт готовий — клієнту надіслано сповіщення")
+    except Exception as e:
+        await q.answer(f"Помилка: {e}", show_alert=True)
+        return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
+
+    if new_val and req:
         try:
-            await ctx.bot.send_message(
+            await q._bot.send_message(
                 req["user_id"],
-                f"{status_msgs[new_status]}\n\nЗаявка: *#{req_id}* — {req['request_type']}",
-                parse_mode="Markdown")
+                f"📄 *Звіт про оцінку готовий!*\n\n"
+                f"Замовлення: *{req['request_type']}*\n\n"
+                f"Для отримання звіту зв'яжіться з нами:\n📞 {PHONE2}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    *([[InlineKeyboardButton("💬 Написати менеджеру", url=MANAGER_TG_URL)]]
+                      if MANAGER_TG_URL else [])
+                ]))
         except Exception:
             pass
-    return ADMIN
+
+    await q.answer("✅ Звіт готовий — клієнту надіслано" if new_val else "⏳ Знято позначку")
+    return await _admin_view_request(q, req_id)
 
 
 async def _admin_stats(q) -> int:
@@ -1884,6 +2078,118 @@ async def _admin_clients(q) -> int:
                               reply_markup=InlineKeyboardMarkup([[
                                   InlineKeyboardButton("← Назад", callback_data="adm|home")
                               ]]))
+    return ADMIN
+
+
+async def handle_admin_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обробляє введення адміна: нотатка / дедлайн / повідомлення клієнту."""
+    msg = upd.message
+    if not msg or not msg.text or msg.from_user.id not in ADMIN_IDS:
+        return ADMIN
+
+    text = msg.text.strip()
+
+    # Нотатка
+    if "crm_note_req_id" in ctx.user_data:
+        req_id = ctx.user_data.pop("crm_note_req_id")
+        conn = None
+        try:
+            conn = await _db_connect()
+            await conn.execute(
+                "UPDATE requests SET admin_notes=$1, updated_at=NOW() WHERE id=$2",
+                text, req_id)
+            await conn.execute(
+                "INSERT INTO request_messages (request_id, sender, message) VALUES ($1,$2,$3)",
+                req_id, "admin", f"[Нотатка] {text}")
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Помилка: {e}")
+            return ADMIN
+        finally:
+            if conn:
+                await _db_release(conn)
+        await msg.reply_text(f"✅ Нотатку збережено до заявки #{req_id}",
+                             reply_markup=InlineKeyboardMarkup([[
+                                 InlineKeyboardButton("← До заявки",
+                                                      callback_data=f"adm|view|{req_id}")
+                             ]]))
+        return ADMIN
+
+    # Дедлайн
+    if "crm_deadline_req_id" in ctx.user_data:
+        req_id = ctx.user_data.pop("crm_deadline_req_id")
+        conn = None
+        try:
+            conn = await _db_connect()
+            await conn.execute(
+                "UPDATE requests SET deadline=$1, updated_at=NOW() WHERE id=$2",
+                text, req_id)
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Помилка: {e}")
+            return ADMIN
+        finally:
+            if conn:
+                await _db_release(conn)
+        await msg.reply_text(f"✅ Дедлайн встановлено: *{text}*",
+                             parse_mode="Markdown",
+                             reply_markup=InlineKeyboardMarkup([[
+                                 InlineKeyboardButton("← До заявки",
+                                                      callback_data=f"adm|view|{req_id}")
+                             ]]))
+        return ADMIN
+
+    # Повідомлення клієнту
+    if "crm_msg_req_id" in ctx.user_data:
+        req_id = ctx.user_data.pop("crm_msg_req_id")
+        conn = None
+        user_id = None
+        req_type = "—"
+        try:
+            conn = await _db_connect()
+            row = await conn.fetchrow(
+                "SELECT user_id, request_type FROM requests WHERE id=$1", req_id)
+            if row:
+                user_id  = row["user_id"]
+                req_type = row["request_type"]
+            await conn.execute(
+                "INSERT INTO request_messages (request_id, sender, message) VALUES ($1,$2,$3)",
+                req_id, "admin", text)
+            await conn.execute(
+                "UPDATE requests SET updated_at=NOW() WHERE id=$1", req_id)
+        except Exception as e:
+            await msg.reply_text(f"⚠️ Помилка: {e}")
+            return ADMIN
+        finally:
+            if conn:
+                await _db_release(conn)
+
+        if user_id:
+            try:
+                await upd.get_bot().send_message(
+                    user_id,
+                    f"📩 *Повідомлення від оцінювача*\n"
+                    f"Замовлення: *{req_type}* (#{req_id})\n\n"
+                    f"{text}\n\n📞 {PHONE2}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        *([[InlineKeyboardButton("💬 Відповісти", url=MANAGER_TG_URL)]]
+                          if MANAGER_TG_URL else [])
+                    ]))
+                await msg.reply_text(f"✅ Повідомлення надіслано клієнту (заявка #{req_id})",
+                                     reply_markup=InlineKeyboardMarkup([[
+                                         InlineKeyboardButton("← До заявки",
+                                                              callback_data=f"adm|view|{req_id}")
+                                     ]]))
+            except Exception as e:
+                await msg.reply_text(f"⚠️ Не вдалося надіслати клієнту: {e}")
+        return ADMIN
+
+    # Якщо немає активного введення — показуємо підказку
+    await msg.reply_text(
+        "🔐 Ви в режимі адмін-панелі.\n"
+        "Натисніть кнопку в панелі або введіть /admin щоб повернутися.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🏠 Адмін-меню", callback_data="adm|home")
+        ]]))
     return ADMIN
 
 
@@ -2003,11 +2309,12 @@ def build():
                 CallbackQueryHandler(on_menu),
             ],
             ADMIN: [
-                CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"),
+                CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|)"),
                 CallbackQueryHandler(on_menu, pattern="^home$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_text),
             ],
             ADMIN_2FA: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_2fa),
+                CallbackQueryHandler(handle_admin_2fa_callback, pattern=r"^2fa\|"),
             ],
         },
         fallbacks=[
@@ -2022,7 +2329,7 @@ def build():
     # Хендлери поза ConversationHandler (завжди активні)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\||2fa\|)"))
     app.add_error_handler(err_handler)
     return app
 
