@@ -242,10 +242,24 @@ def _targets():
     if CHANNEL_ID: t.append(CHANNEL_ID)
     return list(set(t))
 
+def _md_escape(text: str) -> str:
+    """Екранує спецсимволи Markdown v1."""
+    for ch in ("*", "_", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
 async def notify(ctx, text):
     for tid in _targets():
-        try: await ctx.bot.send_message(tid, text, parse_mode="Markdown")
-        except Exception as e: logger.warning(f"notify {tid}: {e}")
+        try:
+            await ctx.bot.send_message(tid, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"notify markdown {tid}: {e}")
+            try:
+                # Fallback — без форматування
+                plain = text.replace("*", "").replace("`", "").replace("_", "")
+                await ctx.bot.send_message(tid, plain)
+            except Exception as e2:
+                logger.error(f"notify plain {tid}: {e2}")
 
 async def notify_photo(ctx, data, caption):
     for tid in _targets():
@@ -836,7 +850,7 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await send(
             "🏢 *ОЦІНКА24*\n\n"
             "✅ Сертифіковані оцінювачі (ЗУ «Про оцінку майна»)\n"
-            "✅ Досвід роботи понад 10 років\n"
+            "✅ Досвід роботи понад 15 років\n"
             "✅ Оцінка нерухомості, авто, бізнесу, збитків\n"
             "✅ Звіти для банків, нотаріусів, судів\n"
             "✅ Відповідність МСО та НСО України",
@@ -1412,6 +1426,7 @@ async def _show_admin_home(msg_or_query, ctx):
     users_cnt = active_cnt = work_cnt = done_cnt = all_cnt = "—"
 
     if db_ok:
+        conn = None
         try:
             conn = await _db_connect()
             users_cnt  = await conn.fetchval("SELECT COUNT(*) FROM users")
@@ -1419,11 +1434,13 @@ async def _show_admin_home(msg_or_query, ctx):
             work_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='in_progress'")
             done_cnt   = await conn.fetchval("SELECT COUNT(*) FROM requests WHERE status='done'")
             all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
-            await _db_release(conn)
             db_ok = True
         except Exception as e:
             logger.warning(f"Admin home DB error: {e}")
             db_ok = False
+        finally:
+            if conn:
+                await _db_release(conn)
 
     db_status = "✅ підключена" if db_ok else "⚠️ не налаштована"
     gmaps_status = "✅ активний" if gmaps else "⚠️ не налаштований"
@@ -1500,6 +1517,7 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
     if not DATABASE_URL:
         await q.edit_message_text("⚠️ БД не налаштована.")
         return ADMIN
+    conn = None
     try:
         conn = await _db_connect()
         if status_filter:
@@ -1517,10 +1535,12 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
                 FROM requests r JOIN users u ON r.user_id = u.user_id
                 ORDER BY r.created_at DESC LIMIT 20
             """)
-        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
 
     if not rows:
         await q.edit_message_text(
@@ -1545,6 +1565,8 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
 
 
 async def _admin_view_request(q, req_id: int) -> int:
+    conn = None
+    req = None
     try:
         conn = await _db_connect()
         req = await conn.fetchrow("""
@@ -1552,10 +1574,12 @@ async def _admin_view_request(q, req_id: int) -> int:
             FROM requests r JOIN users u ON r.user_id = u.user_id
             WHERE r.id = $1
         """, req_id)
-        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
 
     if not req:
         await q.edit_message_text("⚠️ Заявку не знайдено.")
@@ -1586,6 +1610,8 @@ async def _admin_view_request(q, req_id: int) -> int:
 
 
 async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
+    conn = None
+    req = None
     try:
         conn = await _db_connect()
         req = await conn.fetchrow("""
@@ -1594,10 +1620,12 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
             WHERE r.id = $1
         """, req_id)
         await conn.execute("UPDATE requests SET status=$1 WHERE id=$2", new_status, req_id)
-        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
 
     label = _STATUS_LABELS.get(new_status, new_status)
     await q.edit_message_text(
@@ -1629,6 +1657,7 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
 
 
 async def _admin_stats(q) -> int:
+    conn = None
     try:
         conn = await _db_connect()
         total_users    = await conn.fetchval("SELECT COUNT(*) FROM users")
@@ -1641,10 +1670,12 @@ async def _admin_stats(q) -> int:
             "SELECT request_type, COUNT(*) as cnt FROM requests GROUP BY request_type ORDER BY cnt DESC")
         by_status = await conn.fetch(
             "SELECT status, COUNT(*) as cnt FROM requests GROUP BY status")
-        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
 
     type_lines = "\n".join(f"  • {r['request_type']}: *{r['cnt']}*" for r in by_type)
     status_lines = "\n".join(
@@ -1667,6 +1698,7 @@ async def _admin_stats(q) -> int:
 
 
 async def _admin_clients(q) -> int:
+    conn = None
     try:
         conn = await _db_connect()
         clients = await conn.fetch("""
@@ -1677,10 +1709,12 @@ async def _admin_clients(q) -> int:
             GROUP BY u.user_id, u.full_name, u.phone, u.username, u.created_at
             ORDER BY u.created_at DESC LIMIT 20
         """)
-        await _db_release(conn)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
+    finally:
+        if conn:
+            await _db_release(conn)
 
     if not clients:
         await q.edit_message_text(
