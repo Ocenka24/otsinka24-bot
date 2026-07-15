@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""ОЦІНКА24 — Telegram Bot v5.3 | Google Maps + Адмін-панель + БД"""
+"""ОЦІНКА24 — Telegram Bot v6.0 | AI-консультант + 2FA + Захист від злому"""
 
-import asyncio, logging, os, uuid
+import asyncio
+import logging
+import os
+import random
+import time
+import uuid
+from collections import defaultdict
 from datetime import datetime
 from io import BytesIO
 
@@ -15,6 +21,12 @@ try:
     _gmaps_available = True
 except ImportError:
     _gmaps_available = False
+
+try:
+    import google.generativeai as genai
+    _gemini_available = True
+except ImportError:
+    _gemini_available = False
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -33,42 +45,127 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 # ── Конфіг ────────────────────────────────────────────────
-BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
-ADMIN_IDS          = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
-CHANNEL_ID         = int(os.getenv("CHANNEL_ID", "0"))
-DATABASE_URL       = os.getenv("DATABASE_URL")
+BOT_TOKEN           = os.getenv("BOT_TOKEN", "")
+ADMIN_IDS           = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
+DATABASE_URL        = os.getenv("DATABASE_URL")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 
 gmaps = None
-if _gmaps_available and GOOGLE_MAPS_API_KEY:
+if _gmaps_available and GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY.startswith("AIza"):
     try:
         gmaps = _googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
     except Exception as _e:
-        logging.warning(f"Google Maps Client init failed: {_e} — геокодування через Nominatim")
+        logging.warning(f"Google Maps init failed: {_e}")
 
-WEBSITE     = "https://ocenka24.com.ua/"
-EMAIL       = "info@ocenka24.com.ua"
-PHONE1      = "0 800 502-977"
-PHONE2      = "+38 (050) 3000-173"
-PHONE2_RAW  = "+380503000173"   # для посилань tel:
-_mgr_raw    = os.getenv("MANAGER_TG", "")
-# Нормалізуємо до повного URL (приймаємо і username, і https://t.me/...)
-if _mgr_raw.startswith("http"):
-    MANAGER_TG_URL = _mgr_raw
-elif _mgr_raw:
-    MANAGER_TG_URL = f"https://t.me/{_mgr_raw.lstrip('@')}"
-else:
-    MANAGER_TG_URL = ""
-LOGO        = "https://ocenka24.com.ua/img/ocenka24-logo.png"
+gemini_model = None
+if _gemini_available and GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+        logger.info("✅ Gemini AI підключено")
+    except Exception as _e:
+        logger.warning(f"Gemini init failed: {_e}")
+
+WEBSITE      = "https://ocenka24.com.ua/"
+EMAIL        = "info@ocenka24.com.ua"
+PHONE1       = "0 800 502-977"
+PHONE2       = "+38 (050) 3000-173"
+PHONE2_RAW   = "+380503000173"
+_mgr_raw     = os.getenv("MANAGER_TG", "")
+MANAGER_TG_URL = (
+    _mgr_raw if _mgr_raw.startswith("http")
+    else f"https://t.me/{_mgr_raw.lstrip('@')}" if _mgr_raw
+    else ""
+)
+LOGO = "https://ocenka24.com.ua/img/ocenka24-logo.png"
 
 assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
-MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE, ADMIN, COMMENT, DELIVERY = range(9)
+(MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE,
+ ADMIN, COMMENT, DELIVERY, AI_CHAT, ADMIN_2FA) = range(11)
 
 # ══════════════════════════════════════════════════════════
-# ІНІЦІАЛІЗАЦІЯ БАЗИ
+#  БЕЗПЕКА: Rate limiting, flood, ban, 2FA
 # ══════════════════════════════════════════════════════════
+
+_rate_buckets: dict[int, list[float]] = defaultdict(list)
+_flood_warned: set[int] = set()
+_admin_2fa_store: dict[int, tuple[str, float]] = {}
+_banned_users: set[int] = set()
+
+RATE_LIMIT_MSGS   = 25   # повідомлень
+RATE_LIMIT_WINDOW = 60   # за секунд
+FLOOD_BAN_MSGS    = 50   # тимчасовий блок після N повідомлень
+
+
+def _rate_check(user_id: int) -> bool:
+    """True якщо користувач перевищив ліміт (заблокувати)."""
+    now = time.time()
+    bucket = _rate_buckets[user_id]
+    bucket[:] = [t for t in bucket if now - t < RATE_LIMIT_WINDOW]
+    bucket.append(now)
+    if len(bucket) >= FLOOD_BAN_MSGS:
+        _banned_users.add(user_id)
+        logger.warning(f"FLOOD BAN: user {user_id} ({len(bucket)} msg/{RATE_LIMIT_WINDOW}s)")
+        return True
+    return len(bucket) > RATE_LIMIT_MSGS
+
+
+def _is_banned(user_id: int) -> bool:
+    return user_id in _banned_users
+
+
+def _gen_2fa(user_id: int) -> str:
+    code = f"{random.SystemRandom().randint(0, 999999):06d}"
+    _admin_2fa_store[user_id] = (code, time.time())
+    return code
+
+
+def _verify_2fa(user_id: int, code: str) -> bool:
+    if user_id not in _admin_2fa_store:
+        return False
+    stored, ts = _admin_2fa_store[user_id]
+    if time.time() - ts > 300:
+        _admin_2fa_store.pop(user_id, None)
+        return False
+    if stored == code.strip():
+        _admin_2fa_store.pop(user_id, None)
+        return True
+    return False
+
+
+# ══════════════════════════════════════════════════════════
+#  БАЗА ДАНИХ
+# ══════════════════════════════════════════════════════════
+
+_db_pool = None
+
+
+async def _get_pool():
+    global _db_pool
+    if _db_pool is None and DATABASE_URL:
+        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    return _db_pool
+
+
+async def _db_connect():
+    pool = await _get_pool()
+    if pool:
+        return await pool.acquire()
+    return await asyncpg.connect(DATABASE_URL)
+
+
+async def _db_release(conn):
+    pool = await _get_pool()
+    if pool and conn:
+        await pool.release(conn)
+    elif conn:
+        await conn.close()
+
+
 async def init_db():
     if not DATABASE_URL:
         logger.warning("DATABASE_URL не задано — БД не ініціалізована")
@@ -78,28 +175,37 @@ async def init_db():
         conn = await asyncpg.connect(DATABASE_URL)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
+                user_id   BIGINT PRIMARY KEY,
+                username  TEXT,
                 full_name TEXT,
-                phone TEXT,
+                phone     TEXT,
+                is_banned BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS requests (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
+                id           SERIAL PRIMARY KEY,
+                user_id      BIGINT REFERENCES users(user_id),
                 request_type TEXT NOT NULL,
-                status TEXT DEFAULT 'new',
-                address TEXT,
-                lat DOUBLE PRECISION,
-                lon DOUBLE PRECISION,
-                comment TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                status       TEXT DEFAULT 'new',
+                address      TEXT,
+                lat          DOUBLE PRECISION,
+                lon          DOUBLE PRECISION,
+                comment      TEXT,
+                ai_summary   TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS request_files (
-                id SERIAL PRIMARY KEY,
+                id         SERIAL PRIMARY KEY,
                 request_id INTEGER REFERENCES requests(id),
-                file_id TEXT NOT NULL,
-                file_type TEXT,
+                file_id    TEXT NOT NULL,
+                file_type  TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS security_log (
+                id         SERIAL PRIMARY KEY,
+                user_id    BIGINT,
+                event      TEXT,
+                details    TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         ''')
@@ -120,49 +226,83 @@ async def _save_user(user_id: int, username: str, full_name: str, phone: str):
         await conn.execute('''
             INSERT INTO users (user_id, username, full_name, phone)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (user_id) DO UPDATE SET phone=$4, username=$2, full_name=$3
+            ON CONFLICT (user_id) DO UPDATE
+              SET phone=$4, username=$2, full_name=$3
         ''', user_id, username, full_name, phone)
     except Exception as e:
-        logger.warning(f"DB save_user error: {e}")
+        logger.warning(f"DB save_user: {e}")
     finally:
         if conn:
             await _db_release(conn)
 
 
-# ── Об'єкти оцінки ────────────────────────────────────────
+async def _log_security(user_id: int, event: str, details: str = ""):
+    if not DATABASE_URL:
+        return
+    conn = None
+    try:
+        conn = await _db_connect()
+        await conn.execute(
+            "INSERT INTO security_log (user_id, event, details) VALUES ($1,$2,$3)",
+            user_id, event, details[:500])
+    except Exception:
+        pass
+    finally:
+        if conn:
+            await _db_release(conn)
+
+
+# ══════════════════════════════════════════════════════════
+#  ОБ'ЄКТИ ОЦІНКИ
+# ══════════════════════════════════════════════════════════
+
 OBJECTS = {
-    "car": ("🚗","Оцінка транспортного засобу",[
+    "car": ("🚗", "Оцінка транспортного засобу", [
         "📋 Технічний паспорт (свідоцтво про реєстрацію)",
         "🪪 Документ що посвідчує особу",
         "📸 Фото ТЗ ззовні з 4 кутів",
         "📸 Фото салону, пробігу та VIN-коду",
-    ]),
-    "flat": ("🏠","Оцінка квартири",[
+    ], 1500, "1 день"),
+    "flat": ("🏠", "Оцінка квартири", [
         "📜 Правовстановлюючий документ",
         "📋 Технічний паспорт",
         "🪪 Документ що посвідчує особу",
         "📸 Фото кімнат, кухні, санвузлу",
-    ]),
-    "house": ("🏡","Оцінка житлового будинку",[
+    ], 1600, "1 день"),
+    "house": ("🏡", "Оцінка житлового будинку", [
         "📜 Правовстановлюючий документ на будинок",
         "📋 Технічний паспорт",
         "📜 Правовстановлюючий документ на землю",
         "🪪 Документ що посвідчує особу",
         "📸 Фото будинку ззовні з 4 кутів та всередині",
-    ]),
-    "land": ("🌿","Оцінка земельної ділянки",[
+    ], 1600, "1 день"),
+    "land": ("🌿", "Оцінка земельної ділянки", [
         "📜 Правовстановлюючий документ на землю",
         "🪪 Документ що посвідчує особу",
         "📸 Фото ділянки (4-6 штук)",
-    ]),
-    "nonres": ("🏭","Оцінка нежитлової будівлі/споруди",[
+    ], 1500, "1 день"),
+    "nonres": ("🏭", "Оцінка нежитлової будівлі/споруди", [
         "📜 Правовстановлюючий документ",
         "📋 Технічний паспорт",
         "🪪 Документ що посвідчує особу / юридичну особу",
         "📸 Фото будівлі ззовні з 4 кутів та всередині",
-    ]),
+    ], 2500, "за домовленістю"),
 }
 
+_PRICES_TEXT = (
+    "💰 *Вартість оцінки ОЦІНКА24*\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🚗 Транспортний засіб — *1 500 грн* / 1 день\n"
+    "🏠 Квартира — *1 600 грн* / 1 день\n"
+    "🏡 Будинок — *1 600 грн* / 1 день\n"
+    "🌿 Земельна ділянка — *1 500 грн* / 1 день\n"
+    "🏭 Нежитлова нерухомість — *від 2 500 грн*\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📦 Звіт надсилається Новою Поштою або електронно\n"
+    "🎯 Для банку, нотаріуса, суду, страховки, органів опіки\n\n"
+    f"📞 Уточнити вартість: {'+38 (050) 3000-173'}\n"
+    f"🌐 ocenka24.com.ua"
+)
 
 # ══════════════════════════════════════════════════════════
 #  КЛАВІАТУРИ
@@ -170,483 +310,42 @@ OBJECTS = {
 
 def main_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚗 Оцінка авто",          callback_data="obj_car")],
-        [InlineKeyboardButton("🏠 Оцінка квартири",      callback_data="obj_flat")],
-        [InlineKeyboardButton("🏡 Оцінка будинку",       callback_data="obj_house")],
-        [InlineKeyboardButton("🌿 Оцінка землі",         callback_data="obj_land")],
-        [InlineKeyboardButton("🏭 Нежитлова нерухомість",callback_data="obj_nonres")],
-        [InlineKeyboardButton("💰 Ціни на оцінку",       callback_data="pre_info")],
-        [InlineKeyboardButton("📍 Геолокація",           callback_data="location")],
-        [InlineKeyboardButton("ℹ️ Про компанію", callback_data="about"),
-         InlineKeyboardButton("📞 Контакти",     callback_data="contact")],
+        [InlineKeyboardButton("🤖 AI-консультант",        callback_data="ai_chat")],
+        [InlineKeyboardButton("🚗 Оцінка авто",           callback_data="obj_car"),
+         InlineKeyboardButton("🏠 Оцінка квартири",       callback_data="obj_flat")],
+        [InlineKeyboardButton("🏡 Оцінка будинку",        callback_data="obj_house"),
+         InlineKeyboardButton("🌿 Оцінка землі",          callback_data="obj_land")],
+        [InlineKeyboardButton("🏭 Нежитлова нерухомість", callback_data="obj_nonres")],
+        [InlineKeyboardButton("💰 Ціни на оцінку",        callback_data="pre_info")],
+        [InlineKeyboardButton("ℹ️ Про компанію",  callback_data="about"),
+         InlineKeyboardButton("📞 Контакти",      callback_data="contact")],
     ])
+
 
 def object_kb():
-    """Клавіатура всередині заявки на оцінку."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Фото з GPS",            callback_data="obj_photogps")],
-        [InlineKeyboardButton("📹 Відеоогляд",            callback_data="obj_video")],
+        [InlineKeyboardButton("📸 Фото з GPS",                   callback_data="obj_photogps")],
+        [InlineKeyboardButton("📹 Відеоогляд",                   callback_data="obj_video")],
         [InlineKeyboardButton("✅ Завершити надсилання документів", callback_data="done")],
-        [InlineKeyboardButton("🏠 Головне меню",          callback_data="home")],
+        [InlineKeyboardButton("🏠 Головне меню",                  callback_data="home")],
     ])
 
-def upload_kb():
-    return object_kb()
 
 def gps_kb(label="📍 Поділитися геолокацією"):
     return ReplyKeyboardMarkup(
         [[KeyboardButton(label, request_location=True)]],
         one_time_keyboard=True, resize_keyboard=True)
 
+
 def home_kb():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Головне меню", callback_data="home")]])
 
-def admin_main_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Активні заявки",  callback_data="adm|active")],
-        [InlineKeyboardButton("📊 Всі заявки",      callback_data="adm|all")],
-        [InlineKeyboardButton("📈 Статистика",      callback_data="adm|stats")],
-        [InlineKeyboardButton("👥 Клієнти",         callback_data="adm|clients")],
-        [InlineKeyboardButton("🏠 Головне меню",    callback_data="home")],
-    ])
-
-# залишаємо alias для сумісності
-def admin_kb():
-    return admin_main_kb()
-
-
-_STATUS_LABELS = {
-    "new":         "🆕 Нова",
-    "in_progress": "🔄 В роботі",
-    "done":        "✅ Виконано",
-    "rejected":    "❌ Відхилено",
-}
-
-def _status_kb(req_id: int, back: str = "adm|active") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Виконано",    callback_data=f"st|{req_id}|done")],
-        [InlineKeyboardButton("🔄 В роботі",   callback_data=f"st|{req_id}|in_progress")],
-        [InlineKeyboardButton("❌ Відхилено",   callback_data=f"st|{req_id}|rejected")],
-        [InlineKeyboardButton("🆕 Нова",        callback_data=f"st|{req_id}|new")],
-        [InlineKeyboardButton("← Назад",        callback_data=back)],
-    ])
-
-
-
-# ══════════════════════════════════════════════════════════
-#  РОЗСИЛКА
-# ══════════════════════════════════════════════════════════
-
-def _targets():
-    t = list(ADMIN_IDS)
-    if CHANNEL_ID: t.append(CHANNEL_ID)
-    return list(set(t))
-
-def _md_escape(text: str) -> str:
-    """Екранує спецсимволи Markdown v1."""
-    for ch in ("*", "_", "`", "["):
-        text = text.replace(ch, "\\" + ch)
-    return text
-
-async def notify(ctx, text):
-    for tid in _targets():
-        try:
-            await ctx.bot.send_message(tid, text, parse_mode="Markdown")
-        except Exception as e:
-            logger.warning(f"notify markdown {tid}: {e}")
-            try:
-                # Fallback — без форматування
-                plain = text.replace("*", "").replace("`", "").replace("_", "")
-                await ctx.bot.send_message(tid, plain)
-            except Exception as e2:
-                logger.error(f"notify plain {tid}: {e2}")
-
-async def notify_photo(ctx, data, caption):
-    for tid in _targets():
-        try:
-            if isinstance(data, BytesIO): data.seek(0)
-            await ctx.bot.send_photo(tid, data, caption=caption, parse_mode="Markdown")
-        except Exception as e: logger.warning(f"notify_photo {tid}: {e}")
-
-async def notify_doc(ctx, fid, caption):
-    for tid in _targets():
-        try: await ctx.bot.send_document(tid, fid, caption=caption, parse_mode="Markdown")
-        except Exception as e: logger.warning(f"notify_doc {tid}: {e}")
-
-async def notify_loc(ctx, lat, lon):
-    for tid in _targets():
-        try: await ctx.bot.send_location(tid, lat, lon)
-        except Exception as e: logger.warning(f"notify_loc {tid}: {e}")
-
-
-# ══════════════════════════════════════════════════════════
-#  ФОТО+GPS: ОБРОБКА ЗОБРАЖЕНЬ
-# ══════════════════════════════════════════════════════════
-
-_FONT_CACHE: dict = {}
-_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_cyr.ttf")
-_LOGO_CACHE: Image.Image | None = None
-
-# Шляхи до шрифтів з підтримкою кирилиці
-_FONT_PATHS = [
-    _FONT_FILE,
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-    "arial.ttf",
-]
-
-
-def _load_logo_sync() -> "Image.Image | None":
-    """Завантажує логотип компанії (синхронно, кешується)."""
-    global _LOGO_CACHE
-    if _LOGO_CACHE is not None:
-        return _LOGO_CACHE
-    import urllib.request
-    try:
-        req = urllib.request.Request(LOGO, headers={"User-Agent": "Otsinka24Bot/5.3"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = r.read()
-        img = Image.open(BytesIO(data)).convert("RGBA")
-        _LOGO_CACHE = img
-        logger.info("✅ Логотип завантажено")
-        return img
-    except Exception as e:
-        logger.warning(f"Логотип не завантажено: {e}")
-        return None
-
-
-def _ensure_cyrillic_font_sync():
-    """Завантажує шрифт з підтримкою кирилиці якщо жоден не знайдено (синхронно)."""
-    for p in _FONT_PATHS[1:]:
-        if os.path.exists(p):
-            logger.info(f"Шрифт знайдено: {p}")
-            return
-    if os.path.exists(_FONT_FILE):
-        return
-    logger.info("Завантажую шрифт з підтримкою кирилиці...")
-    import urllib.request
-    urls = [
-        "https://github.com/liberationfonts/liberation-fonts/raw/main/Liberation-fonts-ttf-2.1.5/LiberationSans-Bold.ttf",
-        "https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
-    ]
-    for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/5.3"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                data = r.read()
-            with open(_FONT_FILE, "wb") as f:
-                f.write(data)
-            logger.info(f"✅ Шрифт завантажено: {url.split('/')[-1]}")
-            return
-        except Exception as e:
-            logger.warning(f"Шрифт {url.split('/')[-1]}: {e}")
-    logger.warning("⚠️ Шрифт не завантажено — кирилиця може не відображатися")
-
-
-def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    if size in _FONT_CACHE:
-        return _FONT_CACHE[size]
-    for p in _FONT_PATHS:
-        try:
-            f = ImageFont.truetype(p, size)
-            _FONT_CACHE[size] = f
-            return f
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def _text_h(draw: ImageDraw.Draw, text: str, font) -> int:
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[3] - bb[1]
-
-
-def _text_w(draw: ImageDraw.Draw, text: str, font) -> int:
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[2] - bb[0]
-
-
-def _wrap_text(draw: ImageDraw.Draw, text: str, font, max_width: int) -> list[str]:
-    """Розбиває текст на рядки щоб вмістити у max_width пікселів."""
-    words = text.split()
-    lines, current = [], ""
-    for word in words:
-        test = (current + " " + word).strip()
-        if _text_w(draw, test, font) <= max_width:
-            current = test
-        else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
-    return lines or [text]
-
-
-async def _fetch_async(url: str) -> bytes | None:
-    loop = asyncio.get_running_loop()
-    def _sync():
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/5.3"})
-        with urllib.request.urlopen(req, timeout=15) as r:
-            return r.read()
-    try:
-        return await loop.run_in_executor(None, _sync)
-    except Exception as e:
-        logger.warning(f"Fetch {url[:60]}: {e}")
-        return None
-
-
-def _get_exif_gps(image: Image.Image):
-    """Витягує GPS з EXIF через сучасний API Pillow."""
-    try:
-        from PIL.ExifTags import TAGS, GPSTAGS
-        exif = image.getexif()
-        if not exif:
-            return None, None
-        gps_ifd = exif.get_ifd(0x8825)   # GPSInfo IFD
-        if not gps_ifd:
-            return None, None
-        gps = {GPSTAGS.get(k, k): v for k, v in gps_ifd.items()}
-        if "GPSLatitude" not in gps:
-            return None, None
-        def to_deg(v): return float(v[0]) + float(v[1])/60 + float(v[2])/3600
-        lat = to_deg(gps["GPSLatitude"])
-        lon = to_deg(gps["GPSLongitude"])
-        if gps.get("GPSLatitudeRef")  == "S": lat = -lat
-        if gps.get("GPSLongitudeRef") == "W": lon = -lon
-        return round(lat, 7), round(lon, 7)
-    except Exception as e:
-        logger.warning(f"EXIF GPS: {e}")
-        return None, None
-
-
-async def _get_address(lat: float, lon: float) -> str:
-    """Пріоритет: Google Maps → Nominatim → BigDataCloud."""
-    import json
-
-    # 1. Google Maps
-    if gmaps:
-        try:
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None, lambda: gmaps.reverse_geocode((lat, lon), language="uk")
-            )
-            if result:
-                addr = result[0]["formatted_address"]
-                logger.info(f"Google Maps address: {addr}")
-                return addr
-        except Exception as e:
-            logger.warning(f"Google Maps geocoding error: {e}")
-
-    # 2. Nominatim (найточніший безкоштовний)
-    url = (f"https://nominatim.openstreetmap.org/reverse"
-           f"?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18"
-           f"&addressdetails=1")
-    data = await _fetch_async(url)
-    if data:
-        try:
-            j = json.loads(data)
-            addr = j.get("display_name", "")
-            if addr:
-                logger.info(f"Nominatim address: {addr[:80]}")
-                return addr
-        except Exception as e:
-            logger.warning(f"Nominatim parse error: {e}")
-
-    # 3. BigDataCloud (запасний)
-    url = (f"https://api.bigdatacloud.net/data/reverse-geocode-client"
-           f"?latitude={lat}&longitude={lon}&localityLanguage=uk")
-    data = await _fetch_async(url)
-    if data:
-        try:
-            j = json.loads(data)
-            parts = filter(None, [
-                j.get("principalSubdivision", ""),
-                j.get("city", "") or j.get("locality", ""),
-                j.get("countryName", ""),
-            ])
-            addr = ", ".join(parts)
-            if addr.strip(", "):
-                logger.info(f"BigDataCloud address: {addr}")
-                return addr
-        except Exception as e:
-            logger.warning(f"BigDataCloud parse error: {e}")
-
-    logger.warning(f"All geocoding failed for {lat},{lon}")
-    return ""
-
-
-async def _get_map(lat: float, lon: float, px: int = 450) -> Image.Image | None:
-    """Статична карта з OpenStreetMap з маркером."""
-    for zoom in (17, 16, 15):
-        url = (
-            f"https://staticmap.openstreetmap.de/staticmap.php"
-            f"?center={lat},{lon}&zoom={zoom}&size={px}x{px}"
-            f"&markers={lat},{lon},red-pushpin"
-        )
-        data = await _fetch_async(url)
-        if data:
-            try:
-                return Image.open(BytesIO(data)).convert("RGB")
-            except Exception:
-                continue
-    return None
-
-
-def _draw_text_shadow(draw, pos, text, font, fill, shadow=(0, 0, 0, 200), offset=3):
-    """Малює текст з тінню для кращої читабельності."""
-    x, y = pos
-    draw.text((x + offset, y + offset), text, font=font, fill=shadow)
-    draw.text((x, y), text, font=font, fill=fill)
-
-
-async def build_geotagged_photo(
-    photo_bytes: bytes,
-    lat: float | None = None,
-    lon: float | None = None,
-    address: str = "",
-    ts: str = "",
-) -> BytesIO:
-    """
-    Накладає на фото:
-      • Карта розташування (ліворуч вгорі, ~40% ширини)
-      • Темна панель знизу: координати GPS + адреса
-      • ОЦІНКА24 (золотий, правий верхній кут)
-      Дата/час НЕ відображається.
-      Шрифти зменшені на 40% відносно попередньої версії.
-    """
-    img = Image.open(BytesIO(photo_bytes))
-    img = ImageOps.exif_transpose(img)
-    img = img.convert("RGBA")
-    W, H = img.size
-
-    # Розміри шрифтів ~5% від розміру фото (зменшено на 50%)
-    base = max(int(H * 0.013), 8)
-    pad  = max(4, base // 3)
-
-    f_brand = _load_font(base * 2)
-    f_label = _load_font(int(base * 1.2))
-    f_gps   = _load_font(int(base * 1.6))
-    f_addr  = _load_font(int(base * 1.4))
-    f_site  = _load_font(base)
-
-    tmp_draw = ImageDraw.Draw(img)
-
-    # ── Карта ─────────────────────────────────────────────
-    map_img = None
-    map_px = min(int(W * 0.38), 400)
-    if lat and lon:
-        map_img = await _get_map(lat, lon, map_px)
-
-    # ── Висота нижньої панелі ─────────────────────────────
-    lh_label = _text_h(tmp_draw, "К", f_label) + 4
-    lh_gps   = _text_h(tmp_draw, "0", f_gps)   + 8
-    lh_addr  = _text_h(tmp_draw, "А", f_addr)  + 6
-    lh_site  = _text_h(tmp_draw, "0", f_site)  + 4
-
-    text_max_w = W - pad * 2
-    addr_display = address if address else ""
-    addr_lines = _wrap_text(tmp_draw, addr_display, f_addr, text_max_w) if addr_display else []
-
-    panel_h = (pad
-               + lh_label + lh_gps + pad // 2
-               + (lh_label + lh_addr * len(addr_lines) + pad // 2 if addr_lines else 0)
-               + lh_site + pad)
-
-    # ── Напівпрозора панель знизу ─────────────────────────
-    panel_top = H - panel_h
-    overlay = Image.new("RGBA", (W, panel_h), (8, 12, 35, 220))
-    img.paste(overlay, (0, panel_top), overlay)
-    sep = Image.new("RGBA", (W, 4), (255, 215, 0, 210))
-    img.paste(sep, (0, panel_top), sep)
-
-    draw = ImageDraw.Draw(img)
-
-    # ── Логотип компанії — правий верхній кут ────────────
-    logo_h = 0
-    logo_src = _load_logo_sync()
-    if logo_src:
-        # Масштабуємо логотип: ~18% ширини фото
-        logo_target_w = max(int(W * 0.18), 80)
-        lw, lh = logo_src.size
-        logo_target_h = int(lh * logo_target_w / lw)
-        logo_resized = logo_src.resize((logo_target_w, logo_target_h), Image.LANCZOS)
-
-        # Напівпрозорий фон під логотипом
-        bg = Image.new("RGBA", (logo_target_w + pad * 2, logo_target_h + pad * 2), (0, 0, 0, 140))
-        img.paste(bg, (W - logo_target_w - pad * 3, pad // 2), bg)
-        img.paste(logo_resized, (W - logo_target_w - pad * 2, pad), logo_resized)
-        logo_h = logo_target_h + pad * 2
-    else:
-        # Фолбек — текст ОЦІНКА24
-        brand = "ОЦІНКА24"
-        bw = _text_w(draw, brand, f_brand)
-        _draw_text_shadow(draw, (W - bw - pad, pad), brand, f_brand,
-                          fill=(255, 215, 0, 255), shadow=(0, 0, 0, 200), offset=3)
-        logo_h = _text_h(draw, "ОЦІНКА24", f_brand) + pad
-
-    # ── Карта — лівий верхній кут (під логотипом) ────────
-    brand_h = logo_h
-    if map_img:
-        mw, mh = map_img.size
-        border = 5
-        frame = Image.new("RGBA", (mw + border * 2, mh + border * 2), (255, 215, 0, 255))
-        frame.paste(map_img, (border, border))
-        map_y = pad + brand_h + pad
-        if map_y + mh + border * 2 < panel_top - pad:
-            img.paste(frame, (pad, map_y))
-
-    # ── Вміст панелі ──────────────────────────────────────
-    tx = pad
-    y = panel_top + pad
-
-    # Координати
-    _draw_text_shadow(draw, (tx, y), "КООРДИНАТИ:", f_label,
-                      fill=(255, 215, 0, 190), shadow=(0, 0, 0, 140))
-    y += lh_label
-    gps_text = f"{lat:.6f},  {lon:.6f}" if (lat and lon) else "—"
-    _draw_text_shadow(draw, (tx, y), gps_text, f_gps,
-                      fill=(255, 255, 255, 255), shadow=(0, 0, 0, 200), offset=2)
-    y += lh_gps + pad // 2
-
-    # Адреса
-    if addr_lines:
-        _draw_text_shadow(draw, (tx, y), "АДРЕСА:", f_label,
-                          fill=(255, 215, 0, 190), shadow=(0, 0, 0, 140))
-        y += lh_label
-        for line in addr_lines:
-            _draw_text_shadow(draw, (tx, y), line, f_addr,
-                              fill=(160, 220, 255, 255), shadow=(0, 0, 0, 200), offset=2)
-            y += lh_addr
-        y += pad // 2
-
-    # Сайт — справа внизу панелі
-    site_w = _text_w(draw, WEBSITE, f_site)
-    _draw_text_shadow(draw, (W - site_w - pad, y), WEBSITE, f_site,
-                      fill=(180, 180, 255, 200), shadow=(0, 0, 0, 150))
-
-    # ── Зберігаємо ────────────────────────────────────────
-    out = BytesIO()
-    img.convert("RGB").save(out, format="JPEG", quality=94, optimize=True)
-    out.seek(0)
-    return out
-
-
-# ══════════════════════════════════════════════════════════
-#  /start  та  /cancel
-# ══════════════════════════════════════════════════════════
 
 def _start_kb() -> InlineKeyboardMarkup:
-    """Стартова клавіатура — до надання телефону."""
     rows = [
+        [InlineKeyboardButton("🤖 AI-консультант",        callback_data="ai_chat")],
         [InlineKeyboardButton("📋 Замовити оцінку",       callback_data="pre_order")],
-        [InlineKeyboardButton("ℹ️ Умови та вартість",     callback_data="pre_info")],
+        [InlineKeyboardButton("💰 Ціни на оцінку",        callback_data="pre_info")],
         [InlineKeyboardButton("💬 Написати менеджеру",    callback_data="pre_write")],
     ]
     if MANAGER_TG_URL:
@@ -656,11 +355,262 @@ def _start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info(f"/start від {upd.effective_user.id}")
-    u    = upd.effective_user
-    name = (u.first_name or "").strip() or "Друже"
+def admin_main_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Активні заявки",  callback_data="adm|active")],
+        [InlineKeyboardButton("📊 Всі заявки",      callback_data="adm|all")],
+        [InlineKeyboardButton("📈 Статистика",      callback_data="adm|stats")],
+        [InlineKeyboardButton("👥 Клієнти",         callback_data="adm|clients")],
+        [InlineKeyboardButton("🚫 Бан-список",      callback_data="adm|bans")],
+        [InlineKeyboardButton("🏠 Головне меню",    callback_data="home")],
+    ])
 
+
+_STATUS_LABELS = {
+    "new":         "🆕 Нова",
+    "in_progress": "🔄 В роботі",
+    "done":        "✅ Виконано",
+    "rejected":    "❌ Відхилено",
+}
+
+
+def _status_kb(req_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Виконано",   callback_data=f"st|{req_id}|done")],
+        [InlineKeyboardButton("🔄 В роботі",  callback_data=f"st|{req_id}|in_progress")],
+        [InlineKeyboardButton("❌ Відхилено",  callback_data=f"st|{req_id}|rejected")],
+        [InlineKeyboardButton("← Назад",      callback_data="adm|active")],
+    ])
+
+
+# ══════════════════════════════════════════════════════════
+#  РОЗСИЛКА
+# ══════════════════════════════════════════════════════════
+
+def _targets():
+    t = list(ADMIN_IDS)
+    if CHANNEL_ID:
+        t.append(CHANNEL_ID)
+    return list(set(t))
+
+
+async def notify(ctx, text: str):
+    for tid in _targets():
+        try:
+            await ctx.bot.send_message(tid, text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"notify md {tid}: {e}")
+            try:
+                plain = text.replace("*", "").replace("`", "").replace("_", "")
+                await ctx.bot.send_message(tid, plain)
+            except Exception as e2:
+                logger.error(f"notify plain {tid}: {e2}")
+
+
+async def notify_photo(ctx, data, caption: str):
+    for tid in _targets():
+        try:
+            if isinstance(data, BytesIO):
+                data.seek(0)
+            await ctx.bot.send_photo(tid, data, caption=caption, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"notify_photo {tid}: {e}")
+
+
+async def notify_doc(ctx, fid: str, caption: str):
+    for tid in _targets():
+        try:
+            await ctx.bot.send_document(tid, fid, caption=caption, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"notify_doc {tid}: {e}")
+
+
+async def notify_loc(ctx, lat: float, lon: float):
+    for tid in _targets():
+        try:
+            await ctx.bot.send_location(tid, lat, lon)
+        except Exception as e:
+            logger.warning(f"notify_loc {tid}: {e}")
+
+
+# ══════════════════════════════════════════════════════════
+#  AI-КОНСУЛЬТАНТ (Gemini)
+# ══════════════════════════════════════════════════════════
+
+_AI_SYSTEM_PROMPT = f"""Ти — AI-консультант компанії ОЦІНКА24, що надає послуги незалежної оцінки майна в Україні.
+
+ТВОЇ ЗАВДАННЯ (виконуй поетапно):
+1. Привітайся та з'ясуй мету оцінки (продаж, банк, нотаріус, страховка, суд, спадщина тощо)
+2. Визнач вид об'єкта (авто, квартира, будинок, земля, нежитлова нерухомість)
+3. Уточни характеристики об'єкта (марка/модель/рік для авто; площа/поверх/адреса для нерухомості)
+4. Назви орієнтовну вартість та строк
+5. Запропонуй зручний спосіб замовлення
+
+ПРАЙС-ЛИСТ:
+🚗 Транспортний засіб — 1 500 грн / 1 день
+🏠 Квартира — 1 600 грн / 1 день
+🏡 Будинок — 1 600 грн / 1 день
+🌿 Земельна ділянка — 1 500 грн / 1 день
+🏭 Нежитлова нерухомість — від 2 500 грн
+
+КОНТАКТИ:
+Телефон: +38 (050) 3000-173
+Сайт: ocenka24.com.ua
+Режим роботи: Пн-Пт 09:00-18:00, Сб 09:00-14:00
+
+ПРАВИЛА:
+- Спілкуйся ТІЛЬКИ українською мовою
+- Будь лаконічним (не більше 4-5 речень у відповіді)
+- Не вигадуй ціни — використовуй тільки прайс вище
+- Якщо питання юридичне або складне — відповідай "ESCALATE" на початку
+- Якщо клієнт хоче замовити — відповідай "ORDER:[тип]" де тип: car/flat/house/land/nonres
+- Після збору інформації запропонуй надіслати документи через бота
+"""
+
+
+async def _ask_gemini(history: list[dict], user_msg: str) -> str:
+    if not gemini_model:
+        return "ESCALATE"
+    try:
+        loop = asyncio.get_running_loop()
+        chat = gemini_model.start_chat(history=history)
+
+        def _sync():
+            return chat.send_message(user_msg)
+
+        response = await loop.run_in_executor(None, _sync)
+        return response.text.strip()
+    except Exception as e:
+        logger.warning(f"Gemini error: {e}")
+        return "ESCALATE"
+
+
+async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    if not msg or not msg.text:
+        return AI_CHAT
+
+    u = msg.from_user
+    if _is_banned(u.id):
+        await msg.reply_text("⛔ Доступ обмежено. Зверніться до підтримки.")
+        return MENU
+    if _rate_check(u.id):
+        await msg.reply_text("⏳ Ви надсилаєте повідомлення надто швидко. Зачекайте хвилину.")
+        return AI_CHAT
+
+    history = ctx.user_data.setdefault("ai_history", [
+        {"role": "user", "parts": [_AI_SYSTEM_PROMPT]},
+        {"role": "model", "parts": ["Зрозумів. Я готовий консультувати клієнтів ОЦІНКА24 українською мовою."]},
+    ])
+
+    user_text = msg.text.strip()
+
+    await ctx.bot.send_chat_action(msg.chat_id, "typing")
+
+    reply = await _ask_gemini(history, user_text)
+
+    # Додаємо в історію
+    history.append({"role": "user", "parts": [user_text]})
+    history.append({"role": "model", "parts": [reply]})
+
+    # Обрізаємо історію (не більше 20 повідомлень)
+    if len(history) > 22:
+        history[2:4] = []
+
+    # Перевіряємо команди від AI
+    if reply.startswith("ESCALATE"):
+        clean = reply.replace("ESCALATE", "").strip(": \n")
+        if clean:
+            await msg.reply_text(clean)
+
+        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+        phone = ctx.user_data.get("phone", "—")
+        ai_summary = "\n".join(
+            f"{'Клієнт' if m['role']=='user' else 'AI'}: {m['parts'][0][:200]}"
+            for m in history[2:]
+            if m["role"] in ("user", "model")
+        )[-1000:]
+
+        await notify(ctx,
+            f"🤖 *AI ПЕРЕДАЄ СПЕЦІАЛІСТУ*\n"
+            f"{'─'*28}\n"
+            f"👤 *{u.full_name}*\n"
+            f"🆔 `{u.id}` | @{u.username or '—'}\n"
+            f"📱 {phone}\n"
+            f"🕐 {ts}\n\n"
+            f"📋 *Контекст діалогу:*\n{ai_summary[:800]}\n\n"
+            f"[✉️ Написати клієнту](tg://user?id={u.id})")
+
+        kb = InlineKeyboardMarkup([
+            *([[InlineKeyboardButton("💬 Написати менеджеру", url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
+            [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
+            [InlineKeyboardButton("🏠 Головне меню",    callback_data="home")],
+        ])
+        await msg.reply_text(
+            "Ваш запит передано спеціалісту ОЦІНКА24. "
+            "Менеджер зв'яжеться з вами найближчим часом.\n\n"
+            f"📞 Або зателефонуйте: {PHONE2}",
+            reply_markup=kb)
+        ctx.user_data.pop("ai_history", None)
+        return MENU
+
+    if reply.upper().startswith("ORDER:"):
+        obj_key = reply.split(":")[1].strip().lower().split()[0]
+        ctx.user_data.pop("ai_history", None)
+        if obj_key in OBJECTS:
+            if not ctx.user_data.get("phone"):
+                ctx.user_data["pending_obj"] = obj_key
+                await msg.reply_text(
+                    "📱 Для оформлення замовлення вкажіть номер телефону:",
+                    reply_markup=ReplyKeyboardMarkup(
+                        [[KeyboardButton("📱 Поділитися номером", request_contact=True)]],
+                        one_time_keyboard=True, resize_keyboard=True))
+                return PHONE
+            return await _open_object_by_key(upd, ctx, obj_key)
+        else:
+            await msg.reply_text(reply.split(":", 1)[1] if ":" in reply else reply,
+                                 reply_markup=home_kb())
+            return MENU
+
+    # Звичайна відповідь
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
+        [InlineKeyboardButton("💬 Менеджер",        callback_data="pre_write"),
+         InlineKeyboardButton("🏠 Меню",            callback_data="home")],
+    ])
+    await msg.reply_text(reply, reply_markup=kb)
+    return AI_CHAT
+
+
+async def _open_object_by_key(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> int:
+    icon, name, docs, price, term = OBJECTS[key]
+    ctx.user_data.update({"obj_key": key, "obj_name": f"{icon} {name}", "files": []})
+    doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
+    await ctx.bot.send_message(
+        upd.effective_chat.id,
+        f"{icon} *{name}*\n"
+        f"💰 Вартість: *{price:,} грн* | Строк: *{term}*\n\n"
+        f"📋 *Необхідні документи:*\n{doc_list}\n\n"
+        "Надсилайте фото та документи по одному.\n"
+        "Після завершення натисніть *«✅ Завершити»*.",
+        parse_mode="Markdown", reply_markup=object_kb())
+    return UPLOAD
+
+
+# ══════════════════════════════════════════════════════════
+#  /start  та  /cancel
+# ══════════════════════════════════════════════════════════
+
+async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    u = upd.effective_user
+    logger.info(f"/start від {u.id}")
+
+    if _is_banned(u.id):
+        await (upd.message or upd.callback_query.message).reply_text(
+            "⛔ Ваш акаунт заблоковано.")
+        return MENU
+
+    name = (u.first_name or "").strip() or "Друже"
     has_phone = bool(ctx.user_data.get("phone"))
 
     if has_phone:
@@ -669,24 +619,20 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     else:
         text = (
             f"Вітаємо, {name}!\n\n"
-            "ОЦІНКА24 — професійна оцінка майна по всій Україні.\n\n"
-            f"Тел: {PHONE1}\n"
-            f"Моб: {PHONE2}\n"
-            f"Сайт: {WEBSITE}"
+            "ОЦІНКА24 — професійна незалежна оцінка майна по всій Україні.\n\n"
+            f"Тел: {PHONE1}\nМоб: {PHONE2}\nСайт: {WEBSITE}"
         )
         kb = _start_kb()
 
     msg = upd.message or (upd.callback_query.message if upd.callback_query else None)
     if not msg:
-        logger.error("cmd_start: немає message об'єкта")
         return MENU
 
     try:
         await msg.reply_text(text, reply_markup=kb)
     except Exception as e:
-        logger.error(f"cmd_start reply_text failed: {e}")
+        logger.error(f"cmd_start: {e}")
 
-    # Логотип у футері
     try:
         await msg.reply_photo(
             photo=LOGO,
@@ -705,93 +651,97 @@ async def cmd_cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 # ══════════════════════════════════════════════════════════
-#  ГОЛОВНЕ МЕНЮ
+#  ТЕЛЕФОН
 # ══════════════════════════════════════════════════════════
 
 async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обробка номера телефону + відправка адмінам."""
     msg = upd.message
     u   = msg.from_user
     ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
 
     if msg.contact:
         phone = msg.contact.phone_number
-        if not phone.startswith("+"): phone = "+" + phone
+        if not phone.startswith("+"):
+            phone = "+" + phone
     elif msg.text and (msg.text.startswith("+") or msg.text.startswith("0")):
         phone = msg.text.strip()
     else:
-        await msg.reply_text("⚠️ Введіть номер у форматі +380XXXXXXXXX")
+        await msg.reply_text("⚠️ Введіть номер у форматі +380XXXXXXXXX або 0XXXXXXXXX")
         return PHONE
 
     ctx.user_data["phone"] = phone
-    logger.info(f"Телефон клієнта {u.id}: {phone}")
-
     await _save_user(u.id, u.username, u.full_name, phone)
 
-    # Сповіщаємо адміністраторів
     await notify(ctx,
-        f"📱 *НОВИЙ КЛІЄНТ*\n"
-        f"{'─'*28}\n"
-        f"👤 *{u.full_name}*\n"
+        f"📱 *НОВИЙ КЛІЄНТ*\n{'─'*28}\n"
+        f"👤 {u.full_name}\n"
         f"🆔 `{u.id}` | @{u.username or '—'}\n"
-        f"📱 `{phone}`\n"
-        f"🕐 {ts}")
+        f"📱 `{phone}`\n🕐 {ts}")
 
     await msg.reply_text(
-        f"✅ Дякуємо, *{u.first_name}*! Номер збережено.",
-        parse_mode="Markdown",
+        f"✅ Дякуємо! Номер збережено.",
         reply_markup=ReplyKeyboardRemove())
 
-    # Якщо клієнт вибирав об'єкт до надання телефону — відкриваємо його одразу
     pending = ctx.user_data.pop("pending_obj", None)
     if pending and pending in OBJECTS:
-        icon, name, docs = OBJECTS[pending]
-        ctx.user_data.update({"obj_key": pending, "obj_name": f"{icon} {name}", "files": []})
-        doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
-        await ctx.bot.send_message(
-            upd.effective_chat.id,
-            f"{icon} *{name}*\n\n"
-            f"📋 *Необхідні документи:*\n{doc_list}\n\n"
-            "Надсилайте фото та документи по одному.\n"
-            "Після завершення натисніть *«✅ Завершити надсилання документів»*.",
-            parse_mode="Markdown", reply_markup=object_kb())
-        return UPLOAD
+        return await _open_object_by_key(upd, ctx, pending)
 
-    await ctx.bot.send_message(upd.effective_chat.id,
-        "🏠 Головне меню:", reply_markup=main_kb())
+    await ctx.bot.send_message(upd.effective_chat.id, "🏠 Головне меню:", reply_markup=main_kb())
     return MENU
 
+
+# ══════════════════════════════════════════════════════════
+#  ГОЛОВНЕ МЕНЮ (callback)
+# ══════════════════════════════════════════════════════════
 
 async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
     await q.answer()
     d = q.data
 
+    if _is_banned(q.from_user.id):
+        await q.answer("⛔ Доступ обмежено.", show_alert=True)
+        return MENU
+
     async def send(text, kb=None, md=True):
-        try: await q.edit_message_reply_markup(reply_markup=None)
-        except: pass
-        kw = {"parse_mode":"Markdown"} if md else {}
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        kw = {"parse_mode": "Markdown"} if md else {}
         await ctx.bot.send_message(upd.effective_chat.id, text, reply_markup=kb, **kw)
 
+    # AI-консультант
+    if d == "ai_chat":
+        ctx.user_data["ai_history"] = [
+            {"role": "user", "parts": [_AI_SYSTEM_PROMPT]},
+            {"role": "model", "parts": ["Зрозумів. Готовий консультувати."]},
+        ]
+        await send(
+            "🤖 *AI-консультант ОЦІНКА24*\n\n"
+            "Вітаю! Я допоможу визначити тип оцінки, розрахувати вартість та оформити замовлення.\n\n"
+            "Розкажіть, яке майно потрібно оцінити і для якої мети?",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Меню", callback_data="home")]]))
+        return AI_CHAT
+
     if d == "home":
-        # Якщо телефон вже є — головне меню, інакше стартовий екран
         if ctx.user_data.get("phone"):
             await send("🏠 Головне меню:", main_kb())
         else:
             await send(
                 f"🏢 *ОЦІНКА24*\n\n☎️ {PHONE1}\n📱 {PHONE2}\n🌐 {WEBSITE}",
                 _start_kb())
+        ctx.user_data.pop("ai_history", None)
         return MENU
 
-    # ── Стартовий екран — дії без телефону ───────────────
     if d == "pre_order":
-        # Вимагаємо телефон перед замовленням
-        try: await q.edit_message_reply_markup(reply_markup=None)
-        except: pass
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await ctx.bot.send_message(
             upd.effective_chat.id,
-            "📱 *Для оформлення замовлення* вкажіть номер телефону.\n\n"
-            "Натисніть кнопку або введіть вручну (+380...):",
+            "📱 *Для оформлення замовлення* вкажіть номер телефону:",
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardMarkup(
                 [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
@@ -799,33 +749,21 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return PHONE
 
     if d == "pre_info":
-        await send(
-            "📋 *Умови та вартість оцінки*\n\n"
-            "🚗 *Оцінка авто* — від 1000 грн, термін 1 день\n"
-            "🏠 *Оцінка квартири* — від 1500 грн, термін 1–2 дні\n"
-            "🏡 *Оцінка будинку* — від 1500 грн, термін 1–2 дні\n"
-            "🌿 *Оцінка землі* — від 1500 грн, термін 2–3 дні\n"
-            "🏭 *Нежитлова нерухомість* — від 2500 грн, за домовленістю\n\n"
-            "📦 Звіт надсилається Новою Поштою або електронно\n"
-            "🎯 Оцінка для банку, нотаріуса, суду, страховки, органів опіки\n\n"
-            f"📞 Уточнити вартість: {PHONE2}\n"
-            f"🌐 {WEBSITE}",
-            InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
-                [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
-            ]))
+        await send(_PRICES_TEXT, InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
+            [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
+        ]))
         return MENU
 
     if d == "pre_write":
         u2 = upd.effective_user
         ts = datetime.now().strftime("%d.%m.%Y %H:%M")
-        # Надсилаємо запит адміну
         for tid in ADMIN_IDS:
             try:
                 await ctx.bot.send_message(
                     tid,
                     f"💬 *ЗАПИТ НА ЗВ'ЯЗОК*\n{'─'*24}\n"
-                    f"👤 *{u2.full_name}*\n"
+                    f"👤 {u2.full_name}\n"
                     f"🆔 `{u2.id}` | @{u2.username or '—'}\n"
                     f"🕐 {ts}\n\n"
                     f"[✉️ Написати](tg://user?id={u2.id})",
@@ -834,13 +772,10 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 pass
         manager_link = f"[менеджеру]({MANAGER_TG_URL})" if MANAGER_TG_URL else "менеджеру"
         await send(
-            f"✅ Ваш запит надіслано!\n\n"
-            f"Менеджер зв'яжеться з вами найближчим часом.\n\n"
-            f"Також можете написати {manager_link} або зателефонувати:\n"
-            f"📞 {PHONE2}",
+            f"✅ Запит надіслано!\n\nМенеджер зв'яжеться найближчим часом.\n\n"
+            f"Також можете написати {manager_link} або зателефонувати:\n📞 {PHONE2}",
             InlineKeyboardMarkup([
-                *([[InlineKeyboardButton("💬 Написати в Telegram",
-                    url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
+                *([[InlineKeyboardButton("💬 Написати в Telegram", url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
                 [InlineKeyboardButton("📋 Замовити оцінку", callback_data="pre_order")],
                 [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
             ]))
@@ -865,32 +800,33 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"📞 *Контакти ОЦІНКА24*\n\n"
             f"☎️ {PHONE1}\n📱 {PHONE2}\n"
             f"📧 `{EMAIL}`\n🌐 {WEBSITE}\n\n"
-            "🕐 *Графік:*\nПн–Пт: 09:00–18:00\n"
-            "Сб: 09:00–14:00 (за записом)\nНд: вихідний",
+            "🕐 *Графік:*\nПн–Пт: 09:00–18:00\nСб: 09:00–14:00\nНд: вихідний",
             InlineKeyboardMarkup([
-                [InlineKeyboardButton("ℹ️ Про компанію",   callback_data="about")],
-                [InlineKeyboardButton("🏠 Головне меню",   callback_data="home")],
+                [InlineKeyboardButton("ℹ️ Про компанію",  callback_data="about")],
+                [InlineKeyboardButton("🏠 Головне меню",  callback_data="home")],
             ]))
         return MENU
 
     if d == "location":
         await send(
-            "📍 *Геолокація об'єкта оцінки*\n\n"
-            "Перебуваючи біля об'єкта натисніть кнопку нижче\nабо введіть адресу текстом.",
+            "📍 *Геолокація об'єкта оцінки*\n\nПоділіться геолокацією або введіть адресу.",
             home_kb())
         await ctx.bot.send_message(upd.effective_chat.id,
             "👇 Надішліть геолокацію:", reply_markup=gps_kb())
         return LOC
 
     if d in ("photogps", "obj_photogps"):
-        try: await q.edit_message_reply_markup(reply_markup=None)
-        except: pass
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await ctx.bot.send_message(
             upd.effective_chat.id,
-            "📸 Фото з GPS\n\n"
-            "Крок 1 — натисніть кнопку нижче та поділіться геолокацією.\n"
-            "Крок 2 — зробіть НОВЕ фото камерою (не з галереї!).\n\n"
-            "⚠️ Фото з галереї не містять GPS-координат.")
+            "📸 *Фото з GPS*\n\n"
+            "1️⃣ Натисніть кнопку нижче — надішліть геолокацію\n"
+            "2️⃣ Зробіть НОВЕ фото камерою (не з галереї!)\n\n"
+            "⚠️ Фото з галереї не містять GPS-координат.",
+            parse_mode="Markdown")
         await ctx.bot.send_message(
             upd.effective_chat.id,
             "📍 НАДІСЛАТИ ГЕОЛОКАЦІЮ ОБ'ЄКТА",
@@ -903,12 +839,14 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return await start_video(upd, ctx)
 
     if d == "pgps_docs":
-        try: await q.edit_message_reply_markup(reply_markup=None)
-        except: pass
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await ctx.bot.send_message(
             upd.effective_chat.id,
             "📎 Надсилайте документи або фото.\n"
-            "Після завершення натисніть «Завершити замовлення оцінки».",
+            "Після завершення натисніть «Завершити».",
             reply_markup=object_kb())
         return UPLOAD
 
@@ -917,45 +855,31 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     key = d.replace("obj_", "")
     if key in OBJECTS:
-        # Вимагаємо телефон якщо ще не надано
         if not ctx.user_data.get("phone"):
-            try: await q.edit_message_reply_markup(reply_markup=None)
-            except: pass
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             await ctx.bot.send_message(
                 upd.effective_chat.id,
-                "📱 *Для замовлення оцінки* необхідно вказати номер телефону.\n\n"
-                "Натисніть кнопку або введіть вручну (+380...):",
+                "📱 *Для замовлення оцінки* вкажіть номер телефону:",
                 parse_mode="Markdown",
                 reply_markup=ReplyKeyboardMarkup(
                     [[KeyboardButton("📱 Поділитися номером телефону", request_contact=True)]],
                     one_time_keyboard=True, resize_keyboard=True))
             ctx.user_data["pending_obj"] = key
             return PHONE
-        return await show_object(upd, ctx, key)
+        return await _open_object_by_key(upd, ctx, key)
 
     return MENU
 
 
 # ══════════════════════════════════════════════════════════
-#  ДОКУМЕНТИ
+#  ДОКУМЕНТИ / ФАЙЛИ
 # ══════════════════════════════════════════════════════════
 
 async def show_object(upd: Update, ctx: ContextTypes.DEFAULT_TYPE, key: str) -> int:
-    icon, name, docs = OBJECTS[key]
-    ctx.user_data.update({"obj_key": key, "obj_name": f"{icon} {name}", "files": []})
-    doc_list = "\n".join(f"  {i+1}. {d}" for i, d in enumerate(docs))
-    text = (
-        f"{icon} *{name}*\n\n"
-        f"📋 *Необхідні документи:*\n{doc_list}\n\n"
-        "Надсилайте фото та документи по одному.\n"
-        "Ви також можете додати *фото з GPS* або провести *відеоогляд*.\n"
-        "Після завершення натисніть *«✅ Завершити надсилання документів»*."
-    )
-    try: await upd.callback_query.edit_message_reply_markup(reply_markup=None)
-    except: pass
-    await ctx.bot.send_message(upd.effective_chat.id, text,
-                               parse_mode="Markdown", reply_markup=object_kb())
-    return UPLOAD
+    return await _open_object_by_key(upd, ctx, key)
 
 
 async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -973,7 +897,7 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await notify_doc(ctx, msg.document.file_id, caption)
         files.append(msg.document.file_id)
     else:
-        await msg.reply_text("⚠️ Надішліть фото або PDF документа.")
+        await msg.reply_text("⚠️ Надішліть фото або документ.")
         return UPLOAD
 
     ack_text = f"✅ Файлів отримано: {len(files)}"
@@ -986,7 +910,7 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 message_id=ack_id, reply_markup=object_kb())
             return UPLOAD
         except Exception:
-            pass  # якщо редагування не вдалося — надсилаємо нове
+            pass
 
     sent = await msg.reply_text(ack_text, reply_markup=object_kb())
     ctx.user_data["ack_msg_id"] = sent.message_id
@@ -1001,22 +925,25 @@ _COMMENT_EXAMPLES = {
     "nonres": "Офісне приміщення 200 м², 1 поверх, окремий вхід, у центрі міста",
 }
 
+
 async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q     = upd.callback_query
     files = ctx.user_data.get("files", [])
     if not files:
         await q.answer("⚠️ Надішліть хоча б один файл!", show_alert=True)
         return UPLOAD
-    try: await q.edit_message_reply_markup(reply_markup=None)
-    except: pass
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     obj_key = ctx.user_data.get("obj_key", "")
-    example = _COMMENT_EXAMPLES.get(obj_key, "стан об'єкта, площа, рік побудови або інші важливі деталі")
+    example = _COMMENT_EXAMPLES.get(obj_key, "стан об'єкта, площа, рік побудови")
 
     await ctx.bot.send_message(
         upd.effective_chat.id,
         "✅ *Файли отримано!*\n\n"
-        "📝 Додайте короткий *опис об'єкта* оцінки:\n"
+        "📝 Додайте короткий *опис об'єкта*:\n"
         f"_(наприклад: {example})_\n\n"
         "Або пропустіть цей крок:",
         parse_mode="Markdown",
@@ -1027,8 +954,7 @@ async def finish_upload(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def handle_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = upd.message
-    ctx.user_data["comment"] = msg.text.strip() if msg and msg.text else ""
+    ctx.user_data["comment"] = upd.message.text.strip() if upd.message and upd.message.text else ""
     return await _ask_delivery(upd, ctx)
 
 
@@ -1036,16 +962,17 @@ async def skip_comment(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
     await q.answer()
     ctx.user_data["comment"] = ""
-    try: await q.edit_message_reply_markup(reply_markup=None)
-    except: pass
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     return await _ask_delivery(upd, ctx)
 
 
 async def _ask_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Питає дані отримувача звіту (Нова Пошта)."""
     await ctx.bot.send_message(
         upd.effective_chat.id,
-        "📦 *Дані для відправлення звіту (Нова Пошта)*\n\n"
+        "📦 *Дані для доставки звіту (Нова Пошта)*\n\n"
         "Надішліть одним повідомленням:\n"
         "• Місто та номер відділення НП\n"
         "• Прізвище та ім'я отримувача\n"
@@ -1060,8 +987,7 @@ async def _ask_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def handle_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    msg = upd.message
-    ctx.user_data["delivery"] = msg.text.strip() if msg and msg.text else ""
+    ctx.user_data["delivery"] = upd.message.text.strip() if upd.message and upd.message.text else ""
     await _complete_request(upd, ctx)
     return MENU
 
@@ -1070,14 +996,15 @@ async def skip_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
     await q.answer()
     ctx.user_data["delivery"] = ""
-    try: await q.edit_message_reply_markup(reply_markup=None)
-    except: pass
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     await _complete_request(upd, ctx)
     return MENU
 
 
 async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Зберігає заявку в БД, сповіщає адміна і підтверджує клієнту."""
     u        = upd.effective_user
     name     = ctx.user_data.get("obj_name", "—")
     obj_key  = ctx.user_data.get("obj_key", "")
@@ -1085,9 +1012,9 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
     comment  = ctx.user_data.get("comment", "")
     delivery = ctx.user_data.get("delivery", "")
     phone    = ctx.user_data.get("phone", "—")
+    ai_sum   = ctx.user_data.get("ai_summary", "")
     ts       = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # ── Зберігаємо в БД ──────────────────────────────────
     req_id = None
     if DATABASE_URL:
         conn = None
@@ -1095,7 +1022,7 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             conn = await _db_connect()
             await conn.execute("""
                 INSERT INTO users (user_id, username, full_name, phone)
-                VALUES ($1, $2, $3, $4)
+                VALUES ($1,$2,$3,$4)
                 ON CONFLICT (user_id) DO UPDATE
                   SET username=$2, full_name=$3, phone=COALESCE($4, users.phone)
             """, u.id, u.username, u.full_name, phone if phone != "—" else None)
@@ -1103,34 +1030,31 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if delivery:
                 full_comment += ("\n\n" if full_comment else "") + f"Нова Пошта: {delivery}"
             req_id = await conn.fetchval("""
-                INSERT INTO requests (user_id, request_type, status, comment)
-                VALUES ($1, $2, 'new', $3) RETURNING id
-            """, u.id, name, full_comment or None)
-            logger.info(f"Заявку #{req_id} збережено в БД для user {u.id}")
+                INSERT INTO requests (user_id, request_type, status, comment, ai_summary)
+                VALUES ($1,$2,'new',$3,$4) RETURNING id
+            """, u.id, name, full_comment or None, ai_sum or None)
         except Exception as e:
-            logger.warning(f"DB insert request error: {e}")
+            logger.warning(f"DB insert request: {e}")
         finally:
             if conn:
                 await _db_release(conn)
 
-    # ── Сповіщення адміну ─────────────────────────────────
     adm_text = (
         f"📋 *НОВА ЗАЯВКА #{req_id or '—'}*\n{'─'*28}\n"
-        f"👤 *{u.full_name}*\n"
+        f"👤 {u.full_name}\n"
         f"🆔 `{u.id}` | @{u.username or '—'}\n"
-        f"📱 {phone}\n"
-        f"🕐 {ts}\n\n"
-        f"*{name}*\n"
-        f"📎 Файлів: *{len(files)}*"
+        f"📱 {phone}\n🕐 {ts}\n\n"
+        f"*{name}*\n📎 Файлів: *{len(files)}*"
     )
     if comment:
         adm_text += f"\n\n📝 *Опис:* {comment}"
     if delivery:
         adm_text += f"\n\n📦 *Нова Пошта:*\n{delivery}"
+    if ai_sum:
+        adm_text += f"\n\n🤖 *AI-резюме:* {ai_sum[:300]}"
     adm_text += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
     await notify(ctx, adm_text)
 
-    # ── Підтвердження клієнту ─────────────────────────────
     _obj_names = {
         "car":    "транспортного засобу",
         "flat":   "квартири",
@@ -1138,29 +1062,23 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "land":   "земельної ділянки",
         "nonres": "нежитлової нерухомості",
     }
-    obj_label = _obj_names.get(obj_key, name.split()[-1].lower() if name != "—" else "об'єкта")
+    obj_label = _obj_names.get(obj_key, "об'єкта")
 
     client_text = (
         f"✅ Документи на оцінку {obj_label} надіслані!\n\n"
-        f"Оцінювач розгляне вашу заявку та зв'яжеться з вами найближчим часом.\n\n"
+        "Оцінювач розгляне вашу заявку та зв'яжеться найближчим часом.\n\n"
     )
     if delivery:
         client_text += f"📦 Доставка звіту:\n{delivery}\n\n"
-    client_text += (
-        f"Зв'язатися з оцінювачем:\n"
-        f"📞 {PHONE2}"
-    )
+    client_text += f"Зв'язатися з оцінювачем:\n📞 {PHONE2}"
 
-    contact_kb_rows = []
+    kb_rows = []
     if MANAGER_TG_URL:
-        contact_kb_rows.append([
-            InlineKeyboardButton("💬 Написати оцінювачу", url=MANAGER_TG_URL)
-        ])
-    contact_kb_rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="home")])
+        kb_rows.append([InlineKeyboardButton("💬 Написати оцінювачу", url=MANAGER_TG_URL)])
+    kb_rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="home")])
 
-    await ctx.bot.send_message(
-        upd.effective_chat.id, client_text,
-        reply_markup=InlineKeyboardMarkup(contact_kb_rows))
+    await ctx.bot.send_message(upd.effective_chat.id, client_text,
+                               reply_markup=InlineKeyboardMarkup(kb_rows))
 
 
 # ══════════════════════════════════════════════════════════
@@ -1177,21 +1095,17 @@ async def handle_location(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         maps = f"https://maps.google.com/?q={lat},{lon}"
         await notify(ctx,
             f"📍 *ГЕОЛОКАЦІЯ ОБ'ЄКТА*\n"
-            f"👤 *{u.full_name}* | 🆔 `{u.id}`\n"
-            f"📱 @{u.username or '—'}\n🕐 {ts}\n\n"
-            f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})\n\n"
-            f"[✉️ Написати клієнту](tg://user?id={u.id})")
+            f"👤 {u.full_name} | 🆔 `{u.id}`\n"
+            f"🕐 {ts}\n📌 `{lat:.6f}, {lon:.6f}`\n"
+            f"🗺 [Google Maps]({maps})\n[✉️ Написати](tg://user?id={u.id})")
         await notify_loc(ctx, lat, lon)
         await msg.reply_text(
-            f"✅ *Геолокацію зафіксовано!*\n\n"
-            f"📌 `{lat:.5f}, {lon:.5f}`\n🗺 [Google Maps]({maps})",
+            f"✅ *Геолокацію зафіксовано!*\n📌 `{lat:.5f}, {lon:.5f}`\n🗺 [Google Maps]({maps})",
             parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
     elif msg.text and not msg.text.startswith("/"):
         await notify(ctx,
-            f"📍 *АДРЕСА ОБ'ЄКТА*\n"
-            f"👤 *{u.full_name}* | 🕐 {ts}\n"
-            f"📬 {msg.text.strip()}\n\n"
-            f"[✉️ Написати клієнту](tg://user?id={u.id})")
+            f"📍 *АДРЕСА ОБ'ЄКТА*\n👤 {u.full_name} | 🕐 {ts}\n"
+            f"📬 {msg.text.strip()}\n[✉️ Написати](tg://user?id={u.id})")
         await msg.reply_text(
             f"✅ *Адресу зафіксовано!*\n📬 {msg.text.strip()}",
             parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
@@ -1199,20 +1113,275 @@ async def handle_location(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("⚠️ Поділіться геолокацією або введіть адресу.")
         return LOC
 
-    await ctx.bot.send_message(msg.chat.id,
-        "Дякуємо! Оцінювач отримав місцезнаходження.", reply_markup=main_kb())
+    await ctx.bot.send_message(msg.chat.id, "Дякуємо!", reply_markup=main_kb())
     return MENU
 
 
 # ══════════════════════════════════════════════════════════
-#  ФОТО+GPS
+#  ФОТО + GPS
 # ══════════════════════════════════════════════════════════
 
-def _after_gps_photo_kb() -> InlineKeyboardMarkup:
-    """Кнопки після відправлення фото з GPS."""
+_FONT_CACHE: dict = {}
+_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "font_cyr.ttf")
+_LOGO_CACHE: Image.Image | None = None
+
+_FONT_PATHS = [
+    _FONT_FILE,
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+    "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+]
+
+
+def _load_logo_sync() -> "Image.Image | None":
+    global _LOGO_CACHE
+    if _LOGO_CACHE is not None:
+        return _LOGO_CACHE
+    import urllib.request
+    try:
+        req = urllib.request.Request(LOGO, headers={"User-Agent": "Otsinka24Bot/6.0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+        _LOGO_CACHE = Image.open(BytesIO(data)).convert("RGBA")
+        return _LOGO_CACHE
+    except Exception as e:
+        logger.warning(f"Логотип не завантажено: {e}")
+        return None
+
+
+def _ensure_cyrillic_font_sync():
+    for p in _FONT_PATHS[1:]:
+        if os.path.exists(p):
+            return
+    if os.path.exists(_FONT_FILE):
+        return
+    import urllib.request
+    urls = [
+        "https://github.com/liberationfonts/liberation-fonts/raw/main/Liberation-fonts-ttf-2.1.5/LiberationSans-Bold.ttf",
+        "https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
+    ]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/6.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = r.read()
+            with open(_FONT_FILE, "wb") as f:
+                f.write(data)
+            logger.info(f"✅ Шрифт завантажено")
+            return
+        except Exception as e:
+            logger.warning(f"Шрифт: {e}")
+
+
+def _load_font(size: int):
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
+    for p in _FONT_PATHS:
+        try:
+            f = ImageFont.truetype(p, size)
+            _FONT_CACHE[size] = f
+            return f
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _text_h(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[3] - bb[1]
+
+
+def _text_w(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0]
+
+
+def _wrap_text(draw, text, font, max_width):
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        test = (current + " " + word).strip()
+        if _text_w(draw, test, font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+async def _fetch_async(url: str) -> bytes | None:
+    loop = asyncio.get_running_loop()
+    def _sync():
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "Otsinka24Bot/6.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.read()
+    try:
+        return await loop.run_in_executor(None, _sync)
+    except Exception as e:
+        logger.warning(f"Fetch {url[:60]}: {e}")
+        return None
+
+
+async def _get_address(lat: float, lon: float) -> str:
+    import json
+    if gmaps:
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None, lambda: gmaps.reverse_geocode((lat, lon), language="uk"))
+            if result:
+                return result[0]["formatted_address"]
+        except Exception as e:
+            logger.warning(f"Google Maps: {e}")
+
+    url = (f"https://nominatim.openstreetmap.org/reverse"
+           f"?lat={lat}&lon={lon}&format=json&accept-language=uk&zoom=18")
+    data = await _fetch_async(url)
+    if data:
+        try:
+            j = json.loads(data)
+            addr = j.get("display_name", "")
+            if addr:
+                return addr
+        except Exception:
+            pass
+
+    url = (f"https://api.bigdatacloud.net/data/reverse-geocode-client"
+           f"?latitude={lat}&longitude={lon}&localityLanguage=uk")
+    data = await _fetch_async(url)
+    if data:
+        try:
+            j = json.loads(data)
+            parts = filter(None, [
+                j.get("principalSubdivision", ""),
+                j.get("city", "") or j.get("locality", ""),
+                j.get("countryName", ""),
+            ])
+            return ", ".join(parts)
+        except Exception:
+            pass
+    return ""
+
+
+async def _get_map(lat: float, lon: float, px: int = 450) -> "Image.Image | None":
+    for zoom in (17, 16, 15):
+        url = (
+            f"https://staticmap.openstreetmap.de/staticmap.php"
+            f"?center={lat},{lon}&zoom={zoom}&size={px}x{px}"
+            f"&markers={lat},{lon},red-pushpin"
+        )
+        data = await _fetch_async(url)
+        if data:
+            try:
+                return Image.open(BytesIO(data)).convert("RGB")
+            except Exception:
+                continue
+    return None
+
+
+def _draw_shadow(draw, pos, text, font, fill, shadow=(0, 0, 0, 200), offset=3):
+    x, y = pos
+    draw.text((x + offset, y + offset), text, font=font, fill=shadow)
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+async def build_geotagged_photo(photo_bytes: bytes, lat=None, lon=None,
+                                address="", ts="") -> BytesIO:
+    img = Image.open(BytesIO(photo_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGBA")
+    W, H = img.size
+
+    base = max(int(H * 0.013), 8)
+    pad  = max(4, base // 3)
+    f_label = _load_font(int(base * 1.2))
+    f_gps   = _load_font(int(base * 1.6))
+    f_addr  = _load_font(int(base * 1.4))
+    f_site  = _load_font(base)
+
+    tmp_draw = ImageDraw.Draw(img)
+
+    map_img = None
+    map_px  = min(int(W * 0.38), 400)
+    if lat and lon:
+        map_img = await _get_map(lat, lon, map_px)
+
+    lh_label = _text_h(tmp_draw, "К", f_label) + 4
+    lh_gps   = _text_h(tmp_draw, "0", f_gps)   + 8
+    lh_addr  = _text_h(tmp_draw, "А", f_addr)  + 6
+    lh_site  = _text_h(tmp_draw, "0", f_site)  + 4
+
+    addr_lines = _wrap_text(tmp_draw, address, f_addr, W - pad * 2) if address else []
+    panel_h = (pad + lh_label + lh_gps + pad // 2
+               + (lh_label + lh_addr * len(addr_lines) + pad // 2 if addr_lines else 0)
+               + lh_site + pad)
+
+    panel_top = H - panel_h
+    overlay = Image.new("RGBA", (W, panel_h), (8, 12, 35, 220))
+    img.paste(overlay, (0, panel_top), overlay)
+    sep = Image.new("RGBA", (W, 4), (255, 215, 0, 210))
+    img.paste(sep, (0, panel_top), sep)
+
+    draw = ImageDraw.Draw(img)
+
+    # Логотип
+    logo_h = 0
+    logo_src = _load_logo_sync()
+    if logo_src:
+        logo_w = max(int(W * 0.18), 80)
+        lw, lh = logo_src.size
+        logo_h_px = int(lh * logo_w / lw)
+        logo_res = logo_src.resize((logo_w, logo_h_px), Image.LANCZOS)
+        bg = Image.new("RGBA", (logo_w + pad * 2, logo_h_px + pad * 2), (0, 0, 0, 140))
+        img.paste(bg, (W - logo_w - pad * 3, pad // 2), bg)
+        img.paste(logo_res, (W - logo_w - pad * 2, pad), logo_res)
+        logo_h = logo_h_px + pad * 2
+
+    # Карта
+    if map_img:
+        mw, mh = map_img.size
+        border = 5
+        frame = Image.new("RGBA", (mw + border * 2, mh + border * 2), (255, 215, 0, 255))
+        frame.paste(map_img, (border, border))
+        map_y = pad + logo_h + pad
+        if map_y + mh + border * 2 < panel_top - pad:
+            img.paste(frame, (pad, map_y))
+
+    # Панель
+    tx, y = pad, panel_top + pad
+    _draw_shadow(draw, (tx, y), "КООРДИНАТИ:", f_label, fill=(255, 215, 0, 190))
+    y += lh_label
+    gps_text = f"{lat:.6f},  {lon:.6f}" if (lat and lon) else "—"
+    _draw_shadow(draw, (tx, y), gps_text, f_gps, fill=(255, 255, 255, 255), offset=2)
+    y += lh_gps + pad // 2
+
+    if addr_lines:
+        _draw_shadow(draw, (tx, y), "АДРЕСА:", f_label, fill=(255, 215, 0, 190))
+        y += lh_label
+        for line in addr_lines:
+            _draw_shadow(draw, (tx, y), line, f_addr, fill=(160, 220, 255, 255), offset=2)
+            y += lh_addr
+
+    site_w = _text_w(draw, WEBSITE, f_site)
+    _draw_shadow(draw, (W - site_w - pad, y), WEBSITE, f_site, fill=(180, 180, 255, 200))
+
+    out = BytesIO()
+    img.convert("RGB").save(out, format="JPEG", quality=94, optimize=True)
+    out.seek(0)
+    return out
+
+
+def _after_gps_photo_kb():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Ще фото з GPS",         callback_data="obj_photogps")],
-        [InlineKeyboardButton("📎 Додати документи",      callback_data="pgps_docs")],
+        [InlineKeyboardButton("📸 Ще фото з GPS",              callback_data="obj_photogps")],
+        [InlineKeyboardButton("📎 Додати документи",           callback_data="pgps_docs")],
         [InlineKeyboardButton("✅ Завершити замовлення оцінки", callback_data="done")],
     ])
 
@@ -1222,95 +1391,74 @@ async def handle_photogps(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     u   = msg.from_user
     ts  = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-    # ── Отримали геолокацію ───────────────────────────────
     if msg.location:
         ctx.user_data["pgps_lat"] = msg.location.latitude
         ctx.user_data["pgps_lon"] = msg.location.longitude
-
         if "pgps_photo" in ctx.user_data:
             photo_bytes = ctx.user_data.pop("pgps_photo")
-            await _process_and_send_photo(
-                msg, u, ctx, photo_bytes,
-                msg.location.latitude, msg.location.longitude, ts)
+            await _process_gps_photo(msg, u, ctx, photo_bytes,
+                                     msg.location.latitude, msg.location.longitude, ts)
         else:
-            await msg.reply_text(
-                "GPS збережено! Тепер зробіть фото камерою.",
-                reply_markup=ReplyKeyboardRemove())
+            await msg.reply_text("GPS збережено! Тепер зробіть фото камерою.",
+                                 reply_markup=ReplyKeyboardRemove())
         return PHOTOGPS
 
-    # ── Отримали фото ─────────────────────────────────────
     if msg.photo:
         lat = ctx.user_data.get("pgps_lat")
         lon = ctx.user_data.get("pgps_lon")
-
         pfile = await msg.photo[-1].get_file()
         photo_bytes = bytes(await pfile.download_as_bytearray())
 
-        # Немає GPS — фото з галереї: зберігаємо як звичайний файл без геотегу
         if lat is None:
             files = ctx.user_data.setdefault("files", [])
             files.append(msg.photo[-1].file_id)
-            u2    = msg.from_user
-            phone = ctx.user_data.get("phone", "—")
-            name  = ctx.user_data.get("obj_name", "Фото")
             await notify_photo(ctx, msg.photo[-1].file_id,
-                f"{name}\n👤 {u2.full_name} | ☎️ {phone}\n(без геолокації)")
-            await msg.reply_text(
-                "📎 Фото збережено без геотегу (геолокація не надана).",
-                reply_markup=_after_gps_photo_kb())
+                f"{ctx.user_data.get('obj_name','Фото')}\n"
+                f"👤 {u.full_name} | ☎️ {ctx.user_data.get('phone','—')}\n(без геолокації)")
+            await msg.reply_text("📎 Фото збережено без геотегу.",
+                                 reply_markup=_after_gps_photo_kb())
             return PHOTOGPS
 
-        await _process_and_send_photo(msg, u, ctx, photo_bytes, lat, lon, ts)
+        await _process_gps_photo(msg, u, ctx, photo_bytes, lat, lon, ts)
         return PHOTOGPS
 
     await msg.reply_text("Надішліть фото або геолокацію.")
     return PHOTOGPS
 
 
-async def _process_and_send_photo(msg, u, ctx, photo_bytes: bytes,
-                                   lat: float, lon: float, ts: str):
-    """Обробляє фото з GPS, надсилає клієнту і адмінам."""
-    await msg.reply_text("Обробляю фото, визначаю адресу...",
-                         reply_markup=ReplyKeyboardRemove())
-
-    address  = await _get_address(lat, lon)
+async def _process_gps_photo(msg, u, ctx, photo_bytes: bytes, lat, lon, ts):
+    await msg.reply_text("Обробляю фото...", reply_markup=ReplyKeyboardRemove())
+    address   = await _get_address(lat, lon)
     processed = await build_geotagged_photo(photo_bytes, lat, lon, address, ts)
 
-    # Зберігаємо file_id після відправлення
     processed.seek(0)
-    sent = await msg.reply_photo(
-        processed,
+    sent = await msg.reply_photo(processed,
         caption=f"Фото з геотегом ОЦІНКА24\nGPS: {lat:.6f}, {lon:.6f}")
-
     if sent and sent.photo:
         ctx.user_data.setdefault("files", []).append(sent.photo[-1].file_id)
 
     maps = f"https://maps.google.com/?q={lat},{lon}"
     adm_caption = (
         f"📸 *ФОТО+GPS*\n{'─'*24}\n"
-        f"👤 *{u.full_name}* | `{u.id}`\n"
-        f"🕐 {ts}\n"
+        f"👤 {u.full_name} | `{u.id}`\n🕐 {ts}\n"
         f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})"
     )
     if address:
         adm_caption += f"\n📬 {address[:120]}"
-    adm_caption += f"\n\n[✉️ Написати](tg://user?id={u.id})"
+    adm_caption += f"\n[✉️ Написати](tg://user?id={u.id})"
 
     processed.seek(0)
     await notify_photo(ctx, processed, adm_caption)
 
-    ctx.user_data.pop("pgps_lat", None)
-    ctx.user_data.pop("pgps_lon", None)
-    ctx.user_data.pop("pgps_photo", None)
+    for k in ("pgps_lat", "pgps_lon", "pgps_photo"):
+        ctx.user_data.pop(k, None)
 
-    await ctx.bot.send_message(
-        msg.chat.id,
-        "Що робимо далі?",
-        reply_markup=_after_gps_photo_kb())
+    await ctx.bot.send_message(msg.chat.id, "Що робимо далі?",
+                               reply_markup=_after_gps_photo_kb())
 
 
 # ══════════════════════════════════════════════════════════
-#  ВІДЕООГЛЯД (Jitsi)
+#  ВІДЕООГЛЯД
 # ══════════════════════════════════════════════════════════
 
 async def start_video(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1320,21 +1468,21 @@ async def start_video(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     url  = f"https://meet.jit.si/{room}"
     ctx.user_data["jitsi"] = url
 
-    phone = ctx.user_data.get("phone","—")
+    phone = ctx.user_data.get("phone", "—")
     await notify(ctx,
-        f"📹 *ВІДЕООГЛЯД — ОНЛАЙН*\n{'─'*28}\n"
-        f"👤 *{u.full_name}* | 🆔 `{u.id}`\n"
+        f"📹 *ВІДЕООГЛЯД*\n{'─'*28}\n"
+        f"👤 {u.full_name} | 🆔 `{u.id}`\n"
         f"📱 @{u.username or '—'} | ☎️ {phone}\n🕐 {ts}\n\n"
-        f"🔗 `{room}`\n"
-        f"[📹 Приєднатися]({url})\n\n"
-        f"⚡️ Клієнт підключається!\n"
+        f"🔗 `{room}`\n[📹 Приєднатися]({url})\n"
         f"[✉️ Написати](tg://user?id={u.id})")
 
-    try: await upd.callback_query.edit_message_reply_markup(reply_markup=None)
-    except: pass
+    try:
+        await upd.callback_query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
     await ctx.bot.send_message(upd.effective_chat.id,
-        "📹 *Відеоогляд розпочато!*\nОцінювач отримав сповіщення і незабаром приєднається.",
+        "📹 *Відеоогляд розпочато!*\nОцінювач незабаром приєднається.",
         parse_mode="Markdown")
     await ctx.bot.send_message(upd.effective_chat.id,
         "📍 Поділіться геолокацією об'єкта:",
@@ -1357,13 +1505,11 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         lat, lon = msg.location.latitude, msg.location.longitude
         maps = f"https://maps.google.com/?q={lat},{lon}"
         await notify(ctx,
-            f"📍 *GPS (відеоогляд)*\n"
-            f"👤 {u.full_name} | 🕐 {ts}\n"
+            f"📍 *GPS (відеоогляд)*\n👤 {u.full_name} | 🕐 {ts}\n"
             f"📌 `{lat:.6f}, {lon:.6f}`\n🗺 [Google Maps]({maps})")
         await notify_loc(ctx, lat, lon)
-        await msg.reply_text(
-            f"GPS зафіксовано: {lat:.5f}, {lon:.5f}",
-            reply_markup=ReplyKeyboardRemove())
+        await msg.reply_text(f"GPS зафіксовано: {lat:.5f}, {lon:.5f}",
+                             reply_markup=ReplyKeyboardRemove())
     elif msg.text and not msg.text.startswith("/"):
         await notify(ctx, f"📍 *АДРЕСА (відеоогляд)*\n👤 {u.full_name}\n📬 {msg.text.strip()}")
         await msg.reply_text(f"Адресу зафіксовано: {msg.text.strip()}",
@@ -1372,53 +1518,56 @@ async def handle_video_loc(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("Поділіться геолокацією або введіть адресу.")
         return VIDEOLOC
 
-    # Показуємо кнопку відеодзвінка + кнопки продовження
     video_kb = InlineKeyboardMarkup([
         *([[InlineKeyboardButton("📹 Увійти у відеодзвінок", url=jitsi)]] if jitsi else []),
         [InlineKeyboardButton("📸 Ще фото з GPS",              callback_data="obj_photogps")],
         [InlineKeyboardButton("📎 Додати документи",           callback_data="pgps_docs")],
         [InlineKeyboardButton("✅ Завершити замовлення оцінки", callback_data="done")],
     ])
-    await ctx.bot.send_message(
-        msg.chat.id,
-        "Що робимо далі?",
-        reply_markup=video_kb)
+    await ctx.bot.send_message(msg.chat.id, "Що робимо далі?", reply_markup=video_kb)
     return UPLOAD
 
 
 # ══════════════════════════════════════════════════════════
-#  АДМІН-ПАНЕЛЬ
+#  АДМІН-ПАНЕЛЬ + 2FA
 # ══════════════════════════════════════════════════════════
-
-_db_pool = None
-
-async def _get_pool():
-    global _db_pool
-    if _db_pool is None and DATABASE_URL:
-        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
-    return _db_pool
-
-async def _db_connect():
-    pool = await _get_pool()
-    if pool:
-        return await pool.acquire()
-    return await asyncpg.connect(DATABASE_URL)
-
-async def _db_release(conn):
-    pool = await _get_pool()
-    if pool and conn:
-        await pool.release(conn)
-    elif conn:
-        await conn.close()
-
 
 async def admin_panel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     u = upd.effective_user
     if u.id not in ADMIN_IDS:
         await upd.message.reply_text("⛔ Доступ заборонено.")
+        await _log_security(u.id, "ADMIN_DENIED", f"@{u.username}")
         return MENU
-    await _show_admin_home(upd.message, ctx)
-    return ADMIN
+
+    code = _gen_2fa(u.id)
+    await upd.message.reply_text(
+        f"🔐 *Двофакторна аутентифікація*\n\n"
+        f"Введіть код підтвердження:\n`{code}`\n\n"
+        f"⏱ Код дійсний 5 хвилин.",
+        parse_mode="Markdown")
+    await _log_security(u.id, "ADMIN_2FA_SENT", "")
+    return ADMIN_2FA
+
+
+async def handle_admin_2fa(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    u   = msg.from_user
+
+    if u.id not in ADMIN_IDS:
+        return MENU
+
+    code_input = msg.text.strip() if msg.text else ""
+
+    if _verify_2fa(u.id, code_input):
+        await _log_security(u.id, "ADMIN_2FA_OK", "")
+        await _show_admin_home(msg, ctx)
+        return ADMIN
+    else:
+        await _log_security(u.id, "ADMIN_2FA_FAIL", code_input[:10])
+        await msg.reply_text(
+            "❌ Невірний або застарілий код.\n\n"
+            "Введіть /admin щоб отримати новий код.")
+        return MENU
 
 
 async def _show_admin_home(msg_or_query, ctx):
@@ -1436,20 +1585,23 @@ async def _show_admin_home(msg_or_query, ctx):
             all_cnt    = await conn.fetchval("SELECT COUNT(*) FROM requests")
             db_ok = True
         except Exception as e:
-            logger.warning(f"Admin home DB error: {e}")
+            logger.warning(f"Admin home DB: {e}")
             db_ok = False
         finally:
             if conn:
                 await _db_release(conn)
 
-    db_status = "✅ підключена" if db_ok else "⚠️ не налаштована"
-    gmaps_status = "✅ активний" if gmaps else "⚠️ не налаштований"
+    db_status    = "✅ підключена" if db_ok else "⚠️ не налаштована"
+    gmaps_status = "✅ активний"   if gmaps else "⚠️ не налаштований"
+    ai_status    = "✅ активний"   if gemini_model else "⚠️ не налаштований"
 
     text = (
-        "🔐 *Адмін-панель ОЦІНКА24*\n"
+        "🔐 *Адмін-панель ОЦІНКА24 v6.0*\n"
         f"{'─' * 28}\n"
         f"🗄 БД: {db_status}\n"
         f"🗺 Google Maps: {gmaps_status}\n"
+        f"🤖 Gemini AI: {ai_status}\n"
+        f"🛡 Заблоковано: *{len(_banned_users)}* користувачів\n"
         f"{'─' * 28}\n"
         f"👥 Клієнтів: *{users_cnt}*\n"
         f"📋 Нових заявок: *{active_cnt}*\n"
@@ -1469,7 +1621,6 @@ async def _show_admin_home(msg_or_query, ctx):
 
 
 async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обробник усіх adm|* та st|* колбеків."""
     q = upd.callback_query
     await q.answer()
 
@@ -1479,33 +1630,31 @@ async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     data = q.data
 
-    # ── Головна адмін-сторінка ────────────────────────────
     if data == "adm|home":
         await _show_admin_home(q, ctx)
         return ADMIN
-
-    # ── Активні заявки ────────────────────────────────────
     if data == "adm|active":
         return await _admin_list(q, "new", "📋 Нові заявки")
-
-    # ── Всі заявки ────────────────────────────────────────
     if data == "adm|all":
         return await _admin_list(q, None, "📊 Всі заявки")
-
-    # ── Статистика ────────────────────────────────────────
     if data == "adm|stats":
         return await _admin_stats(q)
-
-    # ── Клієнти ───────────────────────────────────────────
     if data == "adm|clients":
         return await _admin_clients(q)
-
-    # ── Деталі заявки view|{id} ───────────────────────────
+    if data == "adm|bans":
+        return await _admin_bans(q, ctx)
     if data.startswith("adm|view|"):
         req_id = int(data.split("|")[2])
         return await _admin_view_request(q, req_id)
-
-    # ── Зміна статусу st|{id}|{status} ───────────────────
+    if data.startswith("adm|unban|"):
+        uid = int(data.split("|")[2])
+        _banned_users.discard(uid)
+        await q.edit_message_text(f"✅ Користувача `{uid}` розблоковано.",
+                                  parse_mode="Markdown",
+                                  reply_markup=InlineKeyboardMarkup([[
+                                      InlineKeyboardButton("← Назад", callback_data="adm|bans")
+                                  ]]))
+        return ADMIN
     if data.startswith("st|"):
         _, req_id, new_status = data.split("|")
         return await _admin_set_status(q, ctx, int(req_id), new_status)
@@ -1513,11 +1662,12 @@ async def admin_callback(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return ADMIN
 
 
-async def _admin_list(q, status_filter: str | None, title: str) -> int:
+async def _admin_list(q, status_filter, title):
     if not DATABASE_URL:
         await q.edit_message_text("⚠️ БД не налаштована.")
         return ADMIN
     conn = None
+    rows = []
     try:
         conn = await _db_connect()
         if status_filter:
@@ -1525,7 +1675,7 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
                 SELECT r.id, r.request_type, r.status, r.created_at,
                        u.full_name, u.phone
                 FROM requests r JOIN users u ON r.user_id = u.user_id
-                WHERE r.status = $1
+                WHERE r.status=$1
                 ORDER BY r.created_at DESC LIMIT 20
             """, status_filter)
         else:
@@ -1550,29 +1700,30 @@ async def _admin_list(q, status_filter: str | None, title: str) -> int:
             ]]))
         return ADMIN
 
+    icons = {"new": "🆕", "in_progress": "🔄", "done": "✅", "rejected": "❌"}
     text = f"*{title}* ({len(rows)}):\n\n"
     keyboard = []
     for r in rows:
-        status_icon = {"new": "🆕", "in_progress": "🔄", "done": "✅", "rejected": "❌"}.get(r["status"], "❓")
-        dt = r["created_at"].strftime("%d.%m %H:%M") if r["created_at"] else "—"
-        label = f"{status_icon} #{r['id']} {r['request_type']} | {r['full_name']} | {dt}"
+        icon = icons.get(r["status"], "❓")
+        dt   = r["created_at"].strftime("%d.%m %H:%M") if r["created_at"] else "—"
+        label = f"{icon} #{r['id']} {r['request_type'][:20]} | {r['full_name'][:15]} | {dt}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"adm|view|{r['id']}")])
 
     keyboard.append([InlineKeyboardButton("← Назад", callback_data="adm|home")])
     await q.edit_message_text(text, parse_mode="Markdown",
-                               reply_markup=InlineKeyboardMarkup(keyboard))
+                              reply_markup=InlineKeyboardMarkup(keyboard))
     return ADMIN
 
 
 async def _admin_view_request(q, req_id: int) -> int:
     conn = None
-    req = None
+    req  = None
     try:
         conn = await _db_connect()
         req = await conn.fetchrow("""
             SELECT r.*, u.full_name, u.phone, u.username
             FROM requests r JOIN users u ON r.user_id = u.user_id
-            WHERE r.id = $1
+            WHERE r.id=$1
         """, req_id)
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
@@ -1586,38 +1737,38 @@ async def _admin_view_request(q, req_id: int) -> int:
         return ADMIN
 
     status_label = _STATUS_LABELS.get(req["status"], req["status"])
-    maps_link = ""
-    if req["lat"] and req["lon"]:
-        maps_link = f"\n🗺 [Google Maps](https://maps.google.com/?q={req['lat']},{req['lon']})"
+    maps_link = (f"\n🗺 [Google Maps](https://maps.google.com/?q={req['lat']},{req['lon']})"
+                 if req["lat"] and req["lon"] else "")
+    ai_block = f"\n\n🤖 *AI-резюме:*\n{req['ai_summary'][:300]}" if req.get("ai_summary") else ""
 
     text = (
-        f"📋 *Заявка #{req['id']}*\n"
-        f"{'─' * 24}\n"
+        f"📋 *Заявка #{req['id']}*\n{'─' * 24}\n"
         f"📌 Тип: *{req['request_type']}*\n"
         f"🏷 Статус: *{status_label}*\n"
-        f"👤 Клієнт: {req['full_name']}\n"
-        f"📱 Телефон: `{req['phone'] or '—'}`\n"
+        f"👤 {req['full_name']}\n"
+        f"📱 `{req['phone'] or '—'}`\n"
         f"🆔 @{req['username'] or '—'} | `{req['user_id']}`\n"
-        f"📬 Адреса: {req['address'] or '—'}\n"
-        f"📍 GPS: `{req['lat']}, {req['lon']}`{maps_link}\n"
-        f"🕐 {req['created_at'].strftime('%d.%m.%Y %H:%M') if req['created_at'] else '—'}\n\n"
+        f"📬 {req['address'] or '—'}\n"
+        f"📍 `{req['lat']}, {req['lon']}`{maps_link}\n"
+        f"🕐 {req['created_at'].strftime('%d.%m.%Y %H:%M') if req['created_at'] else '—'}"
+        f"{ai_block}\n\n"
         f"[✉️ Написати клієнту](tg://user?id={req['user_id']})"
     )
     await q.edit_message_text(text, parse_mode="Markdown",
-                               reply_markup=_status_kb(req_id),
-                               disable_web_page_preview=True)
+                              reply_markup=_status_kb(req_id),
+                              disable_web_page_preview=True)
     return ADMIN
 
 
 async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
     conn = None
-    req = None
+    req  = None
     try:
         conn = await _db_connect()
         req = await conn.fetchrow("""
             SELECT r.*, u.full_name, u.user_id
             FROM requests r JOIN users u ON r.user_id = u.user_id
-            WHERE r.id = $1
+            WHERE r.id=$1
         """, req_id)
         await conn.execute("UPDATE requests SET status=$1 WHERE id=$2", new_status, req_id)
     except Exception as e:
@@ -1629,27 +1780,24 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
 
     label = _STATUS_LABELS.get(new_status, new_status)
     await q.edit_message_text(
-        f"✅ Заявка *#{req_id}* → {label}",
-        parse_mode="Markdown",
+        f"✅ Заявка *#{req_id}* → {label}", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("← До заявки",    callback_data=f"adm|view|{req_id}")],
-            [InlineKeyboardButton("📋 До списку",   callback_data="adm|active")],
-            [InlineKeyboardButton("🏠 Адмін-меню",  callback_data="adm|home")],
+            [InlineKeyboardButton("← До заявки",   callback_data=f"adm|view|{req_id}")],
+            [InlineKeyboardButton("📋 До списку",  callback_data="adm|active")],
+            [InlineKeyboardButton("🏠 Адмін-меню", callback_data="adm|home")],
         ]))
 
-    # Сповіщення клієнту
     status_msgs = {
-        "done":        "✅ Ваша заявка *виконана*! Оцінювач завершив роботу.",
-        "in_progress": "🔄 Ваша заявка *прийнята в роботу*. Очікуйте на зв'язок.",
-        "rejected":    "❌ Ваша заявка *відхилена*. Зверніться до підтримки.",
-        "new":         "🆕 Ваша заявка *повернута* в чергу.",
+        "done":        "✅ Ваша заявка *виконана*! Очікуйте звіт.",
+        "in_progress": "🔄 Вашу заявку *прийнято в роботу*. Незабаром зв'яжемось.",
+        "rejected":    "❌ Вашу заявку *відхилено*. Для уточнень зверніться до менеджера.",
+        "new":         "🆕 Вашу заявку *повернуто* в чергу.",
     }
     if req and new_status in status_msgs:
         try:
             await ctx.bot.send_message(
                 req["user_id"],
-                f"{status_msgs[new_status]}\n\n"
-                f"Заявка: *#{req_id}* — {req['request_type']}",
+                f"{status_msgs[new_status]}\n\nЗаявка: *#{req_id}* — {req['request_type']}",
                 parse_mode="Markdown")
         except Exception:
             pass
@@ -1660,16 +1808,18 @@ async def _admin_stats(q) -> int:
     conn = None
     try:
         conn = await _db_connect()
-        total_users    = await conn.fetchval("SELECT COUNT(*) FROM users")
-        today_users    = await conn.fetchval(
+        total_u = await conn.fetchval("SELECT COUNT(*) FROM users")
+        today_u = await conn.fetchval(
             "SELECT COUNT(*) FROM users WHERE created_at::date = CURRENT_DATE")
-        total_requests = await conn.fetchval("SELECT COUNT(*) FROM requests")
-        today_requests = await conn.fetchval(
+        total_r = await conn.fetchval("SELECT COUNT(*) FROM requests")
+        today_r = await conn.fetchval(
             "SELECT COUNT(*) FROM requests WHERE created_at::date = CURRENT_DATE")
-        by_type = await conn.fetch(
-            "SELECT request_type, COUNT(*) as cnt FROM requests GROUP BY request_type ORDER BY cnt DESC")
+        by_type   = await conn.fetch(
+            "SELECT request_type, COUNT(*) cnt FROM requests GROUP BY request_type ORDER BY cnt DESC")
         by_status = await conn.fetch(
-            "SELECT status, COUNT(*) as cnt FROM requests GROUP BY status")
+            "SELECT status, COUNT(*) cnt FROM requests GROUP BY status")
+        ai_cnt = await conn.fetchval(
+            "SELECT COUNT(*) FROM requests WHERE ai_summary IS NOT NULL")
     except Exception as e:
         await q.edit_message_text(f"⚠️ Помилка БД: {e}")
         return ADMIN
@@ -1677,23 +1827,23 @@ async def _admin_stats(q) -> int:
         if conn:
             await _db_release(conn)
 
-    type_lines = "\n".join(f"  • {r['request_type']}: *{r['cnt']}*" for r in by_type)
+    type_lines   = "\n".join(f"  • {r['request_type']}: *{r['cnt']}*" for r in by_type)
     status_lines = "\n".join(
         f"  • {_STATUS_LABELS.get(r['status'], r['status'])}: *{r['cnt']}*"
         for r in by_status)
-
     text = (
         "📈 *Статистика ОЦІНКА24*\n"
         f"{'─' * 28}\n"
-        f"👥 Клієнтів всього: *{total_users}* (сьогодні: *{today_users}*)\n"
-        f"📋 Заявок всього: *{total_requests}* (сьогодні: *{today_requests}*)\n\n"
-        f"*По типах:*\n{type_lines or '  —'}\n\n"
-        f"*По статусах:*\n{status_lines or '  —'}"
+        f"👥 Клієнтів: *{total_u}* (сьогодні: *{today_u}*)\n"
+        f"📋 Заявок: *{total_r}* (сьогодні: *{today_r}*)\n"
+        f"🤖 Через AI-консультант: *{ai_cnt}*\n\n"
+        f"*По типах:*\n{type_lines or '—'}\n\n"
+        f"*По статусах:*\n{status_lines or '—'}"
     )
     await q.edit_message_text(text, parse_mode="Markdown",
-                               reply_markup=InlineKeyboardMarkup([[
-                                   InlineKeyboardButton("← Назад", callback_data="adm|home")
-                               ]]))
+                              reply_markup=InlineKeyboardMarkup([[
+                                  InlineKeyboardButton("← Назад", callback_data="adm|home")
+                              ]]))
     return ADMIN
 
 
@@ -1717,11 +1867,10 @@ async def _admin_clients(q) -> int:
             await _db_release(conn)
 
     if not clients:
-        await q.edit_message_text(
-            "👥 Клієнтів ще немає.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("← Назад", callback_data="adm|home")
-            ]]))
+        await q.edit_message_text("👥 Клієнтів ще немає.",
+                                  reply_markup=InlineKeyboardMarkup([[
+                                      InlineKeyboardButton("← Назад", callback_data="adm|home")
+                                  ]]))
         return ADMIN
 
     lines = []
@@ -1729,62 +1878,106 @@ async def _admin_clients(q) -> int:
         dt = c["created_at"].strftime("%d.%m.%Y") if c["created_at"] else "—"
         lines.append(
             f"👤 *{c['full_name']}* | `{c['phone'] or '—'}`\n"
-            f"   @{c['username'] or '—'} | Заявок: {c['req_cnt']} | {dt}"
-        )
+            f"   @{c['username'] or '—'} | Заявок: {c['req_cnt']} | {dt}")
     text = f"👥 *Клієнти* (останні {len(clients)}):\n\n" + "\n\n".join(lines)
-
     await q.edit_message_text(text, parse_mode="Markdown",
-                               reply_markup=InlineKeyboardMarkup([[
-                                   InlineKeyboardButton("← Назад", callback_data="adm|home")
-                               ]]))
+                              reply_markup=InlineKeyboardMarkup([[
+                                  InlineKeyboardButton("← Назад", callback_data="adm|home")
+                              ]]))
+    return ADMIN
+
+
+async def _admin_bans(q, ctx) -> int:
+    if not _banned_users:
+        await q.edit_message_text(
+            "🛡 *Бан-список порожній.*\n\nЗаблокованих користувачів немає.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад", callback_data="adm|home")
+            ]]))
+        return ADMIN
+
+    kb = [[InlineKeyboardButton(f"✅ Розблокувати {uid}", callback_data=f"adm|unban|{uid}")]
+          for uid in list(_banned_users)[:10]]
+    kb.append([InlineKeyboardButton("← Назад", callback_data="adm|home")])
+    await q.edit_message_text(
+        f"🚫 *Заблоковано: {len(_banned_users)} користувачів*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb))
     return ADMIN
 
 
 # ══════════════════════════════════════════════════════════
-#  ЗБІРКА
+#  ЗАХИСТ: перехоплення підозрілих повідомлень
+# ══════════════════════════════════════════════════════════
+
+async def security_middleware(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int | None:
+    u = upd.effective_user
+    if not u:
+        return None
+    if _is_banned(u.id):
+        if upd.message:
+            await upd.message.reply_text("⛔ Ваш акаунт заблоковано.")
+        return MENU
+    if _rate_check(u.id) and upd.message:
+        if u.id not in _flood_warned:
+            _flood_warned.add(u.id)
+            await upd.message.reply_text(
+                "⚠️ Ви надсилаєте повідомлення надто швидко. "
+                "Зачекайте хвилину та спробуйте знову.")
+            await _log_security(u.id, "RATE_LIMITED", f"@{u.username}")
+    return None
+
+
+# ══════════════════════════════════════════════════════════
+#  ПОМИЛКИ
 # ══════════════════════════════════════════════════════════
 
 async def err_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Помилка: {ctx.error}", exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
         try:
-            await update.effective_message.reply_text(
-                "⚠️ Виникла помилка. Спробуйте /start")
+            await update.effective_message.reply_text("⚠️ Виникла помилка. Спробуйте /start")
         except Exception:
             pass
 
 
+# ══════════════════════════════════════════════════════════
+#  POST_INIT
+# ══════════════════════════════════════════════════════════
+
 async def _post_init(app):
-    # Видаляємо webhook щоб не було конфлікту з polling
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook видалено")
     except Exception as e:
         logger.warning(f"delete_webhook: {e}")
-
     if DATABASE_URL:
         try:
             await _get_pool()
             await init_db()
         except Exception as e:
-            logger.error(f"DB init error: {e}")
+            logger.error(f"DB init: {e}")
 
+
+# ══════════════════════════════════════════════════════════
+#  ЗБІРКА
+# ══════════════════════════════════════════════════════════
 
 def build():
     app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
+
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
-            PHONE:    [MessageHandler(
-                (filters.CONTACT | filters.TEXT) & ~filters.COMMAND,
-                handle_phone
-            )],
-            MENU:     [CallbackQueryHandler(on_menu)],
-            UPLOAD:   [
+            PHONE: [MessageHandler(
+                (filters.CONTACT | filters.TEXT) & ~filters.COMMAND, handle_phone)],
+            MENU: [CallbackQueryHandler(on_menu)],
+            UPLOAD: [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
                 CallbackQueryHandler(on_menu),
             ],
-            LOC:      [
+            LOC: [
                 MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, handle_location),
                 CallbackQueryHandler(on_menu, pattern="^home$"),
             ],
@@ -1794,7 +1987,7 @@ def build():
             ],
             PHOTOGPS: [
                 MessageHandler(filters.PHOTO | filters.LOCATION, handle_photogps),
-                CallbackQueryHandler(on_menu),   # обробляє obj_photogps, pgps_docs, done, home
+                CallbackQueryHandler(on_menu),
             ],
             COMMENT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_comment),
@@ -1804,19 +1997,29 @@ def build():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delivery),
                 CallbackQueryHandler(skip_delivery, pattern="^delivery_skip$"),
             ],
+            AI_CHAT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_chat),
+                MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
+                CallbackQueryHandler(on_menu),
+            ],
             ADMIN: [
                 CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"),
                 CallbackQueryHandler(on_menu, pattern="^home$"),
+            ],
+            ADMIN_2FA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_2fa),
             ],
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
             CommandHandler("admin",  admin_panel),
+            CommandHandler("start",  cmd_start),
         ],
         allow_reentry=True,
     )
+
     app.add_handler(conv)
-    # Ці хендлери працюють незалежно від стану розмови
+    # Хендлери поза ConversationHandler (завжди активні)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^(adm\||st\|)"))
@@ -1826,12 +2029,12 @@ def build():
 
 def main():
     _ensure_cyrillic_font_sync()
-    _load_logo_sync()   # кешуємо логотип заздалегідь
-    logger.info("🚀 ОЦІНКА24 Bot v5.3 | Google Maps + Адмін-панель + БД")
-    logger.info(f"   Адмінів:  {len(ADMIN_IDS)}")
-    logger.info(f"   Канал:    {'✅' if CHANNEL_ID else '—'}")
+    _load_logo_sync()
+    logger.info("🚀 ОЦІНКА24 Bot v6.0 | AI + 2FA + Security")
+    logger.info(f"   Адмінів:  {len(ADMIN_IDS)} → {ADMIN_IDS}")
+    logger.info(f"   Канал:    {CHANNEL_ID or '—'}")
     logger.info(f"   БД:       {'✅' if DATABASE_URL else '—'}")
-    logger.info(f"   Google Maps: {'✅' if gmaps else '—'}")
+    logger.info(f"   Gemini:   {'✅' if gemini_model else '—'}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
