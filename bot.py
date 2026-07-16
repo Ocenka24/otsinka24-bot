@@ -629,18 +629,19 @@ async def _ask_gemini(history: list[dict], user_msg: str) -> str:
         return "Вибачте, AI-консультант тимчасово недоступний. Зверніться до менеджера або зателефонуйте нам."
     try:
         loop = asyncio.get_running_loop()
-        chat = gemini_model.start_chat(history=history)
+        # generate_content з повною історією — надійніше ніж start_chat+send_message
+        contents = history + [{"role": "user", "parts": [user_msg]}]
 
         def _sync():
-            return chat.send_message(user_msg)
+            return gemini_model.generate_content(contents)
 
         response = await loop.run_in_executor(None, _sync)
         text = response.text.strip()
-        logger.info(f"Gemini response ({len(text)} chars): {text[:120]}")
+        logger.info(f"Gemini OK ({len(text)} chars): {text[:120]}")
         return text
     except Exception as e:
-        logger.warning(f"Gemini error: {e}")
-        return "Виникла технічна помилка. Спробуйте ще раз або зверніться до менеджера."
+        logger.error(f"Gemini error [{type(e).__name__}]: {e}", exc_info=True)
+        return f"__GEMINI_ERROR__: {type(e).__name__}: {str(e)[:300]}"
 
 
 async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -667,6 +668,26 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         logger.error(f"_ask_gemini unexpected error: {e}", exc_info=True)
         await msg.reply_text("Сталася технічна помилка. Спробуйте ще раз.")
         return AI_CHAT
+
+    # Діагностика помилки Gemini — клієнт бачить нейтральне, адмін — деталі
+    if reply.startswith("__GEMINI_ERROR__:"):
+        err_detail = reply[len("__GEMINI_ERROR__:"):]
+        for aid in ADMIN_IDS:
+            try:
+                await ctx.bot.send_message(
+                    aid,
+                    f"⚠️ Gemini API помилка:\n`{err_detail}`",
+                    parse_mode="Markdown")
+            except Exception:
+                pass
+        await msg.reply_text(
+            "AI-консультант тимчасово не відповідає. "
+            "Спробуйте пізніше або зверніться до менеджера.",
+            reply_markup=InlineKeyboardMarkup([
+                *([[InlineKeyboardButton("💬 Написати менеджеру", url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
+                [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
+            ]))
+        return MENU
 
     # Додаємо в історію
     history.append({"role": "user", "parts": [user_text]})
