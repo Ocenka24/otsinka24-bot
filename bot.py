@@ -868,11 +868,15 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         kb   = main_kb()
     else:
         text = (
-            f"Вітаємо, {name}!\n\n"
-            "🏢 *ОЦІНКА24* — професійна незалежна оцінка майна по всій Україні.\n\n"
+            f"Вітаємо, {name}\\!\n\n"
+            "🏢 *ТОВ «ОЦІНКА24»* — професійна оціночна компанія України з понад "
+            "15\\-річним досвідом роботи\\. Проводимо незалежну оцінку нерухомості, "
+            "транспорту, бізнесу, обладнання, земельних ділянок, майнових прав і збитків\\.\n\n"
+            "*Наша місія* — надавати професійну, незалежну та обґрунтовану оцінку "
+            "відповідно до законодавства України\\.\n\n"
             f"☎️ {PHONE1}\n"
             f"📱 {PHONE2}\n"
-            "🌐 ocenka24.com.ua\n\n"
+            "🌐 [ocenka24\\.com\\.ua](https://ocenka24.com.ua/ua/index.html)\n\n"
             "Оберіть що вас цікавить:"
         )
         kb = _start_kb()
@@ -882,10 +886,19 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return MENU
 
     try:
-        await msg.reply_text(text, reply_markup=kb, parse_mode="Markdown",
-                             disable_web_page_preview=True)
+        if has_phone:
+            await msg.reply_text(text, reply_markup=kb)
+        else:
+            await msg.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2",
+                                 disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"cmd_start: {e}")
+        try:
+            await msg.reply_text(
+                f"Вітаємо! ОЦІНКА24 — незалежна оцінка майна в Україні.",
+                reply_markup=kb)
+        except Exception:
+            pass
 
     try:
         await msg.reply_photo(
