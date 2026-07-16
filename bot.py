@@ -59,14 +59,7 @@ if _gmaps_available and GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY.startswith("
     except Exception as _e:
         logging.warning(f"Google Maps init failed: {_e}")
 
-gemini_model = None
-if _gemini_available and GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-        logger.info("✅ Gemini AI підключено")
-    except Exception as _e:
-        logger.warning(f"Gemini init failed: {_e}")
+gemini_model = None  # initialized later in _init_gemini() after _AI_SYSTEM_PROMPT is defined
 
 WEBSITE      = "https://ocenka24.com.ua/"
 EMAIL        = "info@ocenka24.com.ua"
@@ -497,10 +490,14 @@ def _targets():
     return list(set(t))
 
 
-async def notify(ctx, text: str):
+async def notify(ctx, text: str, kb: InlineKeyboardMarkup | None = None):
     for tid in _targets():
         try:
-            await ctx.bot.send_message(tid, text, parse_mode="Markdown")
+            kw: dict = {"parse_mode": "Markdown"}
+            # Inline keyboards work only in private/group chats, not channels
+            if kb and tid > 0:
+                kw["reply_markup"] = kb
+            await ctx.bot.send_message(tid, text, **kw)
         except Exception as e:
             logger.warning(f"notify md {tid}: {e}")
             try:
@@ -607,9 +604,28 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 — Будь доброзичливим та корисним"""
 
 
+def _init_gemini():
+    global gemini_model
+    if not _gemini_available or not GEMINI_API_KEY:
+        return
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel(
+            "gemini-1.5-flash",
+            system_instruction=_AI_SYSTEM_PROMPT,
+        )
+        logger.info("✅ Gemini AI підключено")
+    except Exception as _e:
+        logger.warning(f"Gemini init failed: {_e}")
+
+
+_init_gemini()
+
+
 async def _ask_gemini(history: list[dict], user_msg: str) -> str:
     if not gemini_model:
-        return "ESCALATE"
+        logger.warning("Gemini недоступний — GEMINI_API_KEY або ліцензія")
+        return "Вибачте, AI-консультант тимчасово недоступний. Зверніться до менеджера або зателефонуйте нам."
     try:
         loop = asyncio.get_running_loop()
         chat = gemini_model.start_chat(history=history)
@@ -618,10 +634,12 @@ async def _ask_gemini(history: list[dict], user_msg: str) -> str:
             return chat.send_message(user_msg)
 
         response = await loop.run_in_executor(None, _sync)
-        return response.text.strip()
+        text = response.text.strip()
+        logger.info(f"Gemini response ({len(text)} chars): {text[:120]}")
+        return text
     except Exception as e:
         logger.warning(f"Gemini error: {e}")
-        return "ESCALATE"
+        return "Виникла технічна помилка. Спробуйте ще раз або зверніться до менеджера."
 
 
 async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -637,10 +655,7 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("⏳ Ви надсилаєте повідомлення надто швидко. Зачекайте хвилину.")
         return AI_CHAT
 
-    history = ctx.user_data.setdefault("ai_history", [
-        {"role": "user", "parts": [_AI_SYSTEM_PROMPT]},
-        {"role": "model", "parts": ["Зрозумів. Я готовий консультувати клієнтів ОЦІНКА24 українською мовою."]},
-    ])
+    history = ctx.user_data.setdefault("ai_history", [])
 
     user_text = msg.text.strip()
 
@@ -653,12 +668,13 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     history.append({"role": "model", "parts": [reply]})
 
     # Обрізаємо історію (не більше 20 повідомлень)
-    if len(history) > 22:
-        history[2:4] = []
+    if len(history) > 20:
+        history[:2] = []
 
     # Перевіряємо команди від AI
-    if reply.startswith("ESCALATE"):
-        clean = reply.replace("ESCALATE", "").strip(": \n")
+    first_word = reply.split()[0].upper() if reply.split() else ""
+    if first_word == "ESCALATE":
+        clean = reply[8:].strip(": \n")
         if clean:
             await msg.reply_text(clean)
 
@@ -829,11 +845,15 @@ async def handle_phone(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data["phone"] = phone
     await _save_user(u.id, u.username, u.full_name, phone)
 
+    client_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✉️ Написати клієнту", url=f"tg://user?id={u.id}"),
+    ]])
     await notify(ctx,
         f"📱 *НОВИЙ КЛІЄНТ*\n{'─'*28}\n"
         f"👤 {u.full_name}\n"
         f"🆔 `{u.id}` | @{u.username or '—'}\n"
-        f"📱 `{phone}`\n🕐 {ts}")
+        f"📱 `{phone}`\n🕐 {ts}",
+        kb=client_kb)
 
     await msg.reply_text(
         f"✅ Дякуємо! Номер збережено.",
@@ -856,10 +876,18 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = upd.callback_query
     await q.answer()
     d = q.data
+    u = q.from_user
 
-    if _is_banned(q.from_user.id):
+    if _is_banned(u.id):
         await q.answer("⛔ Доступ обмежено.", show_alert=True)
         return MENU
+
+    # Відновлюємо телефон з БД якщо немає в пам'яті
+    if not ctx.user_data.get("phone"):
+        saved = await _get_saved_phone(u.id)
+        if saved:
+            ctx.user_data["phone"] = saved
+            logger.info(f"Телефон відновлено в on_menu для {u.id}: {saved}")
 
     async def send(text, kb=None, md=True):
         try:
@@ -871,10 +899,7 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     # AI-консультант
     if d == "ai_chat":
-        ctx.user_data["ai_history"] = [
-            {"role": "user", "parts": [_AI_SYSTEM_PROMPT]},
-            {"role": "model", "parts": ["Зрозумів. Готовий консультувати."]},
-        ]
+        ctx.user_data["ai_history"] = []
         await send(
             "🤖 *AI-консультант ОЦІНКА24*\n\n"
             "Вітаю! Я допоможу визначити тип оцінки, розрахувати вартість та оформити замовлення.\n\n"
@@ -897,6 +922,12 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        if ctx.user_data.get("phone"):
+            await ctx.bot.send_message(
+                upd.effective_chat.id,
+                "🏠 Оберіть тип майна для оцінки:",
+                reply_markup=main_kb())
+            return MENU
         await ctx.bot.send_message(
             upd.effective_chat.id,
             "📱 *Для оформлення замовлення* вкажіть номер телефону:",
@@ -1251,8 +1282,25 @@ async def _complete_request(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
         adm_text += f"\n\n📦 *Нова Пошта:*\n{delivery}"
     if ai_sum:
         adm_text += f"\n\n🤖 *AI-резюме:* {ai_sum[:300]}"
-    adm_text += f"\n\n[✉️ Написати клієнту](tg://user?id={u.id})"
-    await notify(ctx, adm_text)
+    adm_kb_rows: list[list[InlineKeyboardButton]] = []
+    if req_id:
+        adm_kb_rows.append([
+            InlineKeyboardButton("🔄 В роботі", callback_data=f"st|{req_id}|in_progress"),
+            InlineKeyboardButton("✅ Виконано",  callback_data=f"st|{req_id}|done"),
+        ])
+        adm_kb_rows.append([
+            InlineKeyboardButton("📝 Нотатка",    callback_data=f"adm|note|{req_id}"),
+            InlineKeyboardButton("📅 Дедлайн",   callback_data=f"adm|deadline|{req_id}"),
+        ])
+        adm_kb_rows.append([
+            InlineKeyboardButton("📨 Написати клієнту", callback_data=f"adm|msg|{req_id}"),
+        ])
+    else:
+        adm_kb_rows.append([
+            InlineKeyboardButton("✉️ Написати клієнту", url=f"tg://user?id={u.id}"),
+        ])
+    adm_kb = InlineKeyboardMarkup(adm_kb_rows)
+    await notify(ctx, adm_text, kb=adm_kb)
 
     _obj_names = {
         "car":    "транспортного засобу",
