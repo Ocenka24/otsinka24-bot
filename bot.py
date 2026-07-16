@@ -420,6 +420,7 @@ def main_kb():
 
 def object_kb():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📷 Додати фото",                   callback_data="add_photo")],
         [InlineKeyboardButton("📸 Фото з GPS",                   callback_data="obj_photogps")],
         [InlineKeyboardButton("📹 Відеоогляд",                   callback_data="obj_video")],
         [InlineKeyboardButton("✅ Завершити надсилання документів", callback_data="done")],
@@ -656,12 +657,16 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return AI_CHAT
 
     history = ctx.user_data.setdefault("ai_history", [])
-
     user_text = msg.text.strip()
 
     await ctx.bot.send_chat_action(msg.chat_id, "typing")
 
-    reply = await _ask_gemini(history, user_text)
+    try:
+        reply = await _ask_gemini(history, user_text)
+    except Exception as e:
+        logger.error(f"_ask_gemini unexpected error: {e}", exc_info=True)
+        await msg.reply_text("Сталася технічна помилка. Спробуйте ще раз.")
+        return AI_CHAT
 
     # Додаємо в історію
     history.append({"role": "user", "parts": [user_text]})
@@ -676,16 +681,22 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if first_word == "ESCALATE":
         clean = reply[8:].strip(": \n")
         if clean:
-            await msg.reply_text(clean)
+            try:
+                await msg.reply_text(clean)
+            except Exception:
+                pass
 
         ts = datetime.now().strftime("%d.%m.%Y %H:%M")
         phone = ctx.user_data.get("phone", "—")
         ai_summary = "\n".join(
             f"{'Клієнт' if m['role']=='user' else 'AI'}: {m['parts'][0][:200]}"
-            for m in history[2:]
+            for m in history
             if m["role"] in ("user", "model")
         )[-1000:]
 
+        client_link = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✉️ Написати клієнту", url=f"tg://user?id={u.id}"),
+        ]])
         await notify(ctx,
             f"🤖 *AI ПЕРЕДАЄ СПЕЦІАЛІСТУ*\n"
             f"{'─'*28}\n"
@@ -693,8 +704,8 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"🆔 `{u.id}` | @{u.username or '—'}\n"
             f"📱 {phone}\n"
             f"🕐 {ts}\n\n"
-            f"📋 *Контекст діалогу:*\n{ai_summary[:800]}\n\n"
-            f"[✉️ Написати клієнту](tg://user?id={u.id})")
+            f"📋 *Контекст:*\n{ai_summary[:800]}",
+            kb=client_link)
 
         kb = InlineKeyboardMarkup([
             *([[InlineKeyboardButton("💬 Написати менеджеру", url=MANAGER_TG_URL)]] if MANAGER_TG_URL else []),
@@ -733,7 +744,11 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("💬 Менеджер",        callback_data="pre_write"),
          InlineKeyboardButton("🏠 Меню",            callback_data="home")],
     ])
-    await msg.reply_text(reply, reply_markup=kb)
+    try:
+        await msg.reply_text(reply[:4000], reply_markup=kb)
+    except Exception as e:
+        logger.warning(f"AI reply send error: {e}")
+        await msg.reply_text(reply[:4000].encode("utf-8", "replace").decode("utf-8"), reply_markup=kb)
     return AI_CHAT
 
 
@@ -1039,6 +1054,14 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=object_kb())
         return UPLOAD
 
+    if d == "add_photo":
+        files_count = len(ctx.user_data.get("files", []))
+        cnt_text = f" (вже додано: {files_count})" if files_count else ""
+        await send(
+            f"📷 Надішліть фото{cnt_text}.\nМожна надіслати кілька — по одному.",
+            object_kb())
+        return UPLOAD
+
     if d == "done":
         return await finish_upload(upd, ctx)
 
@@ -1204,7 +1227,7 @@ async def _ask_delivery(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         "• Прізвище та ім'я отримувача\n"
         "• Номер телефону отримувача\n\n"
         "_Приклад:_\n"
-        "`Київ, відділення №12\nІваненко Іван\n+380671234567`",
+        "`Київ, відділення Нової Пошти №12\nМиколайчук Степан\n+380671234567`",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭ Пропустити", callback_data="delivery_skip")],
