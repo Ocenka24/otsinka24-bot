@@ -612,7 +612,7 @@ def _init_gemini():
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         gemini_model = genai.GenerativeModel(
-            "gemini-1.5-flash",
+            "gemini-2.0-flash",
             system_instruction=_AI_SYSTEM_PROMPT,
         )
         logger.info("✅ Gemini AI підключено")
