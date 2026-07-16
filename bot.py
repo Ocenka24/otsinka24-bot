@@ -626,7 +626,7 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 • Оригінал Новою Поштою — за рахунок клієнта
 
 КОНТАКТИ:
-• Телефон: +38 (050) 3000-173 (Пн-Пт 09:00–18:00, Сб 09:00–14:00)
+• Телефон: +38 (050) 3000-173 (Пн-Пт 09:00–21:00, Сб-Нд 09:00–18:00)
 • Безкоштовно: 0 800 502-977
 • Сайт: ocenka24.com.ua
 
@@ -1085,7 +1085,7 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"📞 *Контакти ОЦІНКА24*\n\n"
             f"☎️ {PHONE1}\n📱 {PHONE2}\n"
             f"📧 `{EMAIL}`\n🌐 ocenka24.com.ua\n\n"
-            "🕐 *Графік:*\nПн–Пт: 09:00–18:00\nСб: 09:00–14:00\nНд: вихідний",
+            "🕐 *Графік:*\nПн–Пт: 09:00–21:00\nСб: 09:00–18:00\nНд: 09:00–18:00",
             InlineKeyboardMarkup([
                 [InlineKeyboardButton("ℹ️ Про компанію",  callback_data="about")],
                 [InlineKeyboardButton("🏠 Головне меню",  callback_data="home")],
@@ -1955,16 +1955,21 @@ async def _show_admin_home(msg_or_query, ctx):
             if conn:
                 await _db_release(conn)
 
-    db_status    = "✅ підключена" if db_ok else "⚠️ не налаштована"
-    gmaps_status = "✅ активний"   if gmaps else "⚠️ не налаштований"
-    ai_status    = "✅ активний"   if GROQ_API_KEY else "⚠️ не налаштований"
+    if db_ok:
+        db_status = "✅ підключена"
+    elif DATABASE_URL:
+        db_status = "⚠️ помилка з'єднання"
+    else:
+        db_status = "⚠️ не налаштована"
+    gmaps_status = "✅ активний" if gmaps else ("⚠️ ключ не AIza" if GOOGLE_MAPS_API_KEY else "— не використовується")
+    ai_status    = "✅ активний" if GROQ_API_KEY else "⚠️ не налаштований"
 
     text = (
         "🔐 *Адмін-панель ОЦІНКА24 v6.0*\n"
         f"{'─' * 28}\n"
         f"🗄 БД: {db_status}\n"
         f"🗺 Google Maps: {gmaps_status}\n"
-        f"🤖 Gemini AI: {ai_status}\n"
+        f"🤖 Groq AI: {ai_status}\n"
         f"🛡 Заблоковано: *{len(_banned_users)}* користувачів\n"
         f"{'─' * 28}\n"
         f"👥 Клієнтів: *{users_cnt}*\n"
@@ -2090,7 +2095,11 @@ async def _admin_list(q, status_filter, title):
                 ORDER BY r.created_at DESC LIMIT 20
             """)
     except Exception as e:
-        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        await q.edit_message_text(
+            "⚠️ Помилка з'єднання з БД. Перевірте DATABASE_URL у Railway Variables.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Меню", callback_data="adm|home"),
+            ]]))
         return ADMIN
     finally:
         if conn:
@@ -2159,7 +2168,11 @@ async def _admin_view_request(q, req_id: int) -> int:
                 ORDER BY created_at DESC LIMIT 5
             """, req_id)
     except Exception as e:
-        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        await q.edit_message_text(
+            "⚠️ Помилка з'єднання з БД. Перевірте DATABASE_URL у Railway Variables.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Меню", callback_data="adm|home"),
+            ]]))
         return ADMIN
     finally:
         if conn:
@@ -2253,7 +2266,11 @@ async def _admin_set_status(q, ctx, req_id: int, new_status: str) -> int:
             "INSERT INTO request_messages (request_id, sender, message) VALUES ($1,$2,$3)",
             req_id, "system", f"Статус змінено → {_STATUS_LABELS.get(new_status, new_status)}")
     except Exception as e:
-        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        await q.edit_message_text(
+            "⚠️ Помилка з'єднання з БД. Перевірте DATABASE_URL у Railway Variables.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Меню", callback_data="adm|home"),
+            ]]))
         return ADMIN
     finally:
         if conn:
@@ -2324,7 +2341,11 @@ async def _admin_stats(q) -> int:
         ai_cnt = await conn.fetchval(
             "SELECT COUNT(*) FROM requests WHERE ai_summary IS NOT NULL")
     except Exception as e:
-        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        await q.edit_message_text(
+            "⚠️ Помилка з'єднання з БД. Перевірте DATABASE_URL у Railway Variables.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Меню", callback_data="adm|home"),
+            ]]))
         return ADMIN
     finally:
         if conn:
@@ -2363,7 +2384,11 @@ async def _admin_clients(q) -> int:
             ORDER BY u.created_at DESC LIMIT 20
         """)
     except Exception as e:
-        await q.edit_message_text(f"⚠️ Помилка БД: {e}")
+        await q.edit_message_text(
+            "⚠️ Помилка з'єднання з БД. Перевірте DATABASE_URL у Railway Variables.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Меню", callback_data="adm|home"),
+            ]]))
         return ADMIN
     finally:
         if conn:
