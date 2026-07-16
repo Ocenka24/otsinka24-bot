@@ -46,7 +46,7 @@ ADMIN_IDS           = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if 
 CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
 DATABASE_URL        = os.getenv("DATABASE_URL")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
-GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
 
 gmaps = None
 if _gmaps_available and GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY.startswith("AIza"):
@@ -601,41 +601,45 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 — Будь доброзичливим та корисним"""
 
 
-_GEMINI_URL = (
-    "https://generativelanguage.googleapis.com"
-    "/v1beta/models/gemini-2.0-flash:generateContent"
-)
+_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
 async def _ask_gemini(history: list[dict], user_msg: str) -> str:
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return "Вибачте, AI-консультант тимчасово недоступний. Зверніться до менеджера або зателефонуйте нам."
     try:
-        contents = history + [{"role": "user", "parts": [{"text": user_msg}]}]
+        messages = (
+            [{"role": "system", "content": _AI_SYSTEM_PROMPT}]
+            + history
+            + [{"role": "user", "content": user_msg}]
+        )
         payload = {
-            "system_instruction": {"parts": [{"text": _AI_SYSTEM_PROMPT}]},
-            "contents": contents,
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+            "model": _GROQ_MODEL,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 1024,
         }
         headers = {
-            "x-goog-api-key": GEMINI_API_KEY,
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                _GEMINI_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                _GROQ_URL, json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 if resp.status != 200:
                     body = await resp.text()
-                    logger.error(f"Gemini HTTP {resp.status}: {body[:300]}")
-                    return f"__GEMINI_ERROR__: HTTP {resp.status}: {body[:250]}"
+                    logger.error(f"Groq HTTP {resp.status}: {body[:300]}")
+                    return f"__AI_ERROR__: HTTP {resp.status}: {body[:250]}"
                 data = await resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.info(f"Gemini OK ({len(text)} chars): {text[:120]}")
+        text = data["choices"][0]["message"]["content"].strip()
+        logger.info(f"Groq OK ({len(text)} chars): {text[:120]}")
         return text
     except Exception as e:
-        logger.error(f"Gemini error [{type(e).__name__}]: {e}", exc_info=True)
-        return f"__GEMINI_ERROR__: {type(e).__name__}: {str(e)[:300]}"
+        logger.error(f"Groq error [{type(e).__name__}]: {e}", exc_info=True)
+        return f"__AI_ERROR__: {type(e).__name__}: {str(e)[:300]}"
 
 
 async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -663,9 +667,9 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("Сталася технічна помилка. Спробуйте ще раз.")
         return AI_CHAT
 
-    # Діагностика помилки Gemini — клієнт бачить нейтральне, адмін — деталі
-    if reply.startswith("__GEMINI_ERROR__:"):
-        err_detail = reply[len("__GEMINI_ERROR__:"):]
+    # Діагностика помилки AI — клієнт бачить нейтральне, адмін — деталі
+    if reply.startswith("__AI_ERROR__:"):
+        err_detail = reply[len("__AI_ERROR__:"):]
         for aid in ADMIN_IDS:
             try:
                 await ctx.bot.send_message(
@@ -683,10 +687,10 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             ]))
         return MENU
 
-    # Додаємо в історію (тільки якщо не діагностична помилка)
-    if not reply.startswith("__GEMINI_ERROR__") and not reply.startswith("Вибачте"):
-        history.append({"role": "user", "parts": [{"text": user_text}]})
-        history.append({"role": "model", "parts": [{"text": reply}]})
+    # Додаємо в історію (тільки якщо не помилка)
+    if not reply.startswith("__AI_ERROR__") and not reply.startswith("Вибачте"):
+        history.append({"role": "user",      "content": user_text})
+        history.append({"role": "assistant", "content": reply})
 
     # Обрізаємо історію (не більше 20 повідомлень)
     if len(history) > 20:
@@ -1897,7 +1901,7 @@ async def _show_admin_home(msg_or_query, ctx):
 
     db_status    = "✅ підключена" if db_ok else "⚠️ не налаштована"
     gmaps_status = "✅ активний"   if gmaps else "⚠️ не налаштований"
-    ai_status    = "✅ активний"   if GEMINI_API_KEY else "⚠️ не налаштований"
+    ai_status    = "✅ активний"   if GROQ_API_KEY else "⚠️ не налаштований"
 
     text = (
         "🔐 *Адмін-панель ОЦІНКА24 v6.0*\n"
@@ -2590,7 +2594,7 @@ def main():
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)} → {ADMIN_IDS}")
     logger.info(f"   Канал:    {CHANNEL_ID or '—'}")
     logger.info(f"   БД:       {'✅' if DATABASE_URL else '—'}")
-    logger.info(f"   Gemini:   {'✅' if GEMINI_API_KEY else '—'}")
+    logger.info(f"   Groq AI:  {'✅' if GROQ_API_KEY else '—'}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
