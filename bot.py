@@ -864,39 +864,41 @@ async def cmd_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     has_phone = bool(ctx.user_data.get("phone"))
 
     if has_phone:
-        text = f"З поверненням, {name}! Оберіть тип оцінки:"
-        kb   = main_kb()
+        text      = f"З поверненням, {name}! Оберіть тип оцінки:"
+        parse_md  = False
+        kb        = main_kb()
     else:
         text = (
-            f"Вітаємо, {name}\\!\n\n"
-            "🏢 *ТОВ «ОЦІНКА24»* — професійна оціночна компанія України з понад "
-            "15\\-річним досвідом роботи\\. Проводимо незалежну оцінку нерухомості, "
-            "транспорту, бізнесу, обладнання, земельних ділянок, майнових прав і збитків\\.\n\n"
-            "*Наша місія* — надавати професійну, незалежну та обґрунтовану оцінку "
-            "відповідно до законодавства України\\.\n\n"
+            f"Вітаємо, {name}!\n\n"
+            "🏢 <b>ТОВ «ОЦІНКА24»</b> — професійна оціночна компанія України з понад "
+            "15-річним досвідом роботи. Проводимо незалежну оцінку нерухомості, "
+            "транспорту, бізнесу, обладнання, земельних ділянок, майнових прав і збитків.\n\n"
+            "<b>Наша місія</b> — надавати професійну, незалежну та обґрунтовану оцінку "
+            "відповідно до законодавства України.\n\n"
             f"☎️ {PHONE1}\n"
             f"📱 {PHONE2}\n"
-            "🌐 [ocenka24\\.com\\.ua](https://ocenka24.com.ua/ua/index.html)\n\n"
+            '🌐 <a href="https://ocenka24.com.ua/ua/index.html">ocenka24.com.ua</a>\n\n'
             "Оберіть що вас цікавить:"
         )
-        kb = _start_kb()
+        parse_md  = True
+        kb        = _start_kb()
 
     msg = upd.message or (upd.callback_query.message if upd.callback_query else None)
     if not msg:
         return MENU
 
     try:
-        if has_phone:
-            await msg.reply_text(text, reply_markup=kb)
-        else:
-            await msg.reply_text(text, reply_markup=kb, parse_mode="MarkdownV2",
+        if parse_md:
+            await msg.reply_text(text, reply_markup=kb, parse_mode="HTML",
                                  disable_web_page_preview=True)
+        else:
+            await msg.reply_text(text, reply_markup=kb)
     except Exception as e:
         logger.error(f"cmd_start: {e}")
         try:
-            await msg.reply_text(
-                f"Вітаємо! ОЦІНКА24 — незалежна оцінка майна в Україні.",
-                reply_markup=kb)
+            await msg.reply_text(text.replace("<b>", "").replace("</b>", "")
+                                 .replace('<a href="https://ocenka24.com.ua/ua/index.html">', "")
+                                 .replace("</a>", ""), reply_markup=kb)
         except Exception:
             pass
 
