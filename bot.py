@@ -23,10 +23,16 @@ except ImportError:
     _gmaps_available = False
 
 try:
-    import google.generativeai as genai
+    from google import genai as _genai_sdk
+    from google.genai import types as _genai_types
     _gemini_available = True
 except ImportError:
-    _gemini_available = False
+    try:
+        import google.generativeai as _genai_sdk  # type: ignore
+        _genai_types = None
+        _gemini_available = True
+    except ImportError:
+        _gemini_available = False
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -59,7 +65,7 @@ if _gmaps_available and GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY.startswith("
     except Exception as _e:
         logging.warning(f"Google Maps init failed: {_e}")
 
-gemini_model = None  # initialized later in _init_gemini() after _AI_SYSTEM_PROMPT is defined
+gemini_client = None  # initialized later in _init_gemini() after _AI_SYSTEM_PROMPT is defined
 
 WEBSITE      = "https://ocenka24.com.ua/"
 EMAIL        = "info@ocenka24.com.ua"
@@ -606,16 +612,12 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 
 
 def _init_gemini():
-    global gemini_model
+    global gemini_client
     if not _gemini_available or not GEMINI_API_KEY:
         return
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        gemini_model = genai.GenerativeModel(
-            "gemini-2.0-flash",
-            system_instruction=_AI_SYSTEM_PROMPT,
-        )
-        logger.info("✅ Gemini AI підключено")
+        gemini_client = _genai_sdk.Client(api_key=GEMINI_API_KEY)
+        logger.info("✅ Gemini AI підключено (google-genai SDK)")
     except Exception as _e:
         logger.warning(f"Gemini init failed: {_e}")
 
@@ -624,16 +626,22 @@ _init_gemini()
 
 
 async def _ask_gemini(history: list[dict], user_msg: str) -> str:
-    if not gemini_model:
+    if not gemini_client:
         logger.warning("Gemini недоступний — GEMINI_API_KEY або ліцензія")
         return "Вибачте, AI-консультант тимчасово недоступний. Зверніться до менеджера або зателефонуйте нам."
     try:
         loop = asyncio.get_running_loop()
-        # generate_content з повною історією — надійніше ніж start_chat+send_message
-        contents = history + [{"role": "user", "parts": [user_msg]}]
+        contents = history + [{"role": "user", "parts": [{"text": user_msg}]}]
 
         def _sync():
-            return gemini_model.generate_content(contents)
+            return gemini_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=contents,
+                config=_genai_types.GenerateContentConfig(
+                    system_instruction=_AI_SYSTEM_PROMPT,
+                    temperature=0.7,
+                ),
+            )
 
         response = await loop.run_in_executor(None, _sync)
         text = response.text.strip()
@@ -689,9 +697,10 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             ]))
         return MENU
 
-    # Додаємо в історію
-    history.append({"role": "user", "parts": [user_text]})
-    history.append({"role": "model", "parts": [reply]})
+    # Додаємо в історію (тільки якщо не діагностична помилка)
+    if not reply.startswith("__GEMINI_ERROR__") and not reply.startswith("Вибачте"):
+        history.append({"role": "user", "parts": [{"text": user_text}]})
+        history.append({"role": "model", "parts": [{"text": reply}]})
 
     # Обрізаємо історію (не більше 20 повідомлень)
     if len(history) > 20:
