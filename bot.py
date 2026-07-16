@@ -1897,7 +1897,7 @@ async def _show_admin_home(msg_or_query, ctx):
 
     db_status    = "✅ підключена" if db_ok else "⚠️ не налаштована"
     gmaps_status = "✅ активний"   if gmaps else "⚠️ не налаштований"
-    ai_status    = "✅ активний"   if gemini_model else "⚠️ не налаштований"
+    ai_status    = "✅ активний"   if GEMINI_API_KEY else "⚠️ не налаштований"
 
     text = (
         "🔐 *Адмін-панель ОЦІНКА24 v6.0*\n"
@@ -2590,7 +2590,7 @@ def main():
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)} → {ADMIN_IDS}")
     logger.info(f"   Канал:    {CHANNEL_ID or '—'}")
     logger.info(f"   БД:       {'✅' if DATABASE_URL else '—'}")
-    logger.info(f"   Gemini:   {'✅' if gemini_model else '—'}")
+    logger.info(f"   Gemini:   {'✅' if GEMINI_API_KEY else '—'}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
 
