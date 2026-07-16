@@ -22,17 +22,7 @@ try:
 except ImportError:
     _gmaps_available = False
 
-try:
-    from google import genai as _genai_sdk
-    from google.genai import types as _genai_types
-    _gemini_available = True
-except ImportError:
-    try:
-        import google.generativeai as _genai_sdk  # type: ignore
-        _genai_types = None
-        _gemini_available = True
-    except ImportError:
-        _gemini_available = False
+import aiohttp
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -65,7 +55,7 @@ if _gmaps_available and GOOGLE_MAPS_API_KEY and GOOGLE_MAPS_API_KEY.startswith("
     except Exception as _e:
         logging.warning(f"Google Maps init failed: {_e}")
 
-gemini_client = None  # initialized later in _init_gemini() after _AI_SYSTEM_PROMPT is defined
+# Gemini викликається через REST API — ніяких SDK не потрібно
 
 WEBSITE      = "https://ocenka24.com.ua/"
 EMAIL        = "info@ocenka24.com.ua"
@@ -611,40 +601,36 @@ _AI_SYSTEM_PROMPT = """Ти — AI-консультант компанії ОЦ�
 — Будь доброзичливим та корисним"""
 
 
-def _init_gemini():
-    global gemini_client
-    if not _gemini_available or not GEMINI_API_KEY:
-        return
-    try:
-        gemini_client = _genai_sdk.Client(api_key=GEMINI_API_KEY)
-        logger.info("✅ Gemini AI підключено (google-genai SDK)")
-    except Exception as _e:
-        logger.warning(f"Gemini init failed: {_e}")
-
-
-_init_gemini()
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com"
+    "/v1beta/models/gemini-2.0-flash:generateContent"
+)
 
 
 async def _ask_gemini(history: list[dict], user_msg: str) -> str:
-    if not gemini_client:
-        logger.warning("Gemini недоступний — GEMINI_API_KEY або ліцензія")
+    if not GEMINI_API_KEY:
         return "Вибачте, AI-консультант тимчасово недоступний. Зверніться до менеджера або зателефонуйте нам."
     try:
-        loop = asyncio.get_running_loop()
         contents = history + [{"role": "user", "parts": [{"text": user_msg}]}]
-
-        def _sync():
-            return gemini_client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=contents,
-                config=_genai_types.GenerateContentConfig(
-                    system_instruction=_AI_SYSTEM_PROMPT,
-                    temperature=0.7,
-                ),
-            )
-
-        response = await loop.run_in_executor(None, _sync)
-        text = response.text.strip()
+        payload = {
+            "system_instruction": {"parts": [{"text": _AI_SYSTEM_PROMPT}]},
+            "contents": contents,
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+        }
+        headers = {
+            "x-goog-api-key": GEMINI_API_KEY,
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                _GEMINI_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.error(f"Gemini HTTP {resp.status}: {body[:300]}")
+                    return f"__GEMINI_ERROR__: HTTP {resp.status}: {body[:250]}"
+                data = await resp.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         logger.info(f"Gemini OK ({len(text)} chars): {text[:120]}")
         return text
     except Exception as e:
