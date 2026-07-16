@@ -414,13 +414,13 @@ def main_kb():
     ])
 
 
-def object_kb():
+def object_kb(files_count: int = 0):
+    count_label = f" ({files_count} шт.)" if files_count else ""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📷 Додати фото",                   callback_data="add_photo")],
-        [InlineKeyboardButton("📸 Фото з GPS",                   callback_data="obj_photogps")],
-        [InlineKeyboardButton("📹 Відеоогляд",                   callback_data="obj_video")],
-        [InlineKeyboardButton("✅ Завершити надсилання документів", callback_data="done")],
-        [InlineKeyboardButton("🏠 Головне меню",                  callback_data="home")],
+        [InlineKeyboardButton("📸 Фото з GPS",  callback_data="obj_photogps"),
+         InlineKeyboardButton("📹 Відеоогляд", callback_data="obj_video")],
+        [InlineKeyboardButton(f"✅ Завершити{count_label}", callback_data="done")],
+        [InlineKeyboardButton("🏠 Головне меню", callback_data="home")],
     ])
 
 
@@ -834,8 +834,8 @@ async def _open_object_by_key(upd: Update, ctx: ContextTypes.DEFAULT_TYPE,
         f"🎯 Мета: {purpose_label}\n"
         f"💰 Вартість: *{price_str}* | Строк: *{term}*\n\n"
         f"📋 *Необхідні документи:*\n{doc_list}\n\n"
-        "Надсилайте фото та документи по одному.\n"
-        "Після завершення натисніть *«✅ Завершити»*.",
+        "📎 Надсилайте документи або фото — можна одразу кілька.\n"
+        "Після завершення натисніть *«Завершити»*.",
         parse_mode="Markdown", reply_markup=object_kb())
     return UPLOAD
 
@@ -1123,24 +1123,18 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if d in ("video", "obj_video"):
         return await start_video(upd, ctx)
 
-    if d == "pgps_docs":
+    if d in ("pgps_docs", "add_photo"):
+        files_count = len(ctx.user_data.get("files", []))
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        cnt = f" (вже додано: {files_count})" if files_count else ""
         await ctx.bot.send_message(
             upd.effective_chat.id,
-            "📎 Надсилайте документи або фото.\n"
+            f"📎 Надсилайте документи або фото{cnt} — можна одразу кілька.\n"
             "Після завершення натисніть «Завершити».",
-            reply_markup=object_kb())
-        return UPLOAD
-
-    if d == "add_photo":
-        files_count = len(ctx.user_data.get("files", []))
-        cnt_text = f" (вже додано: {files_count})" if files_count else ""
-        await send(
-            f"📷 Надішліть фото{cnt_text}.\nМожна надіслати кілька — по одному.",
-            object_kb())
+            reply_markup=object_kb(files_count))
         return UPLOAD
 
     if d == "done":
@@ -1230,19 +1224,20 @@ async def handle_file(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await msg.reply_text("⚠️ Надішліть фото або документ.")
         return UPLOAD
 
-    ack_text = f"✅ Файлів отримано: {len(files)}"
+    n        = len(files)
+    ack_text = f"📎 Отримано файлів: {n}\nНадсилайте ще або натисніть «Завершити»."
     ack_id   = ctx.user_data.get("ack_msg_id")
 
     if ack_id:
         try:
             await ctx.bot.edit_message_text(
                 ack_text, chat_id=msg.chat_id,
-                message_id=ack_id, reply_markup=object_kb())
+                message_id=ack_id, reply_markup=object_kb(n))
             return UPLOAD
         except Exception:
             pass
 
-    sent = await msg.reply_text(ack_text, reply_markup=object_kb())
+    sent = await msg.reply_text(ack_text, reply_markup=object_kb(n))
     ctx.user_data["ack_msg_id"] = sent.message_id
     return UPLOAD
 
