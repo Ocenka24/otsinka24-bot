@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN           = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS           = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 CHANNEL_ID          = int(os.getenv("CHANNEL_ID", "0"))
-DATABASE_URL        = os.getenv("DATABASE_URL")
+DATABASE_URL        = (os.getenv("DATABASE_URL") or "").strip() or None
+if DATABASE_URL:
+    # channel_binding не підтримується старими asyncpg — прибираємо
+    DATABASE_URL = DATABASE_URL.replace("&channel_binding=require", "").replace("?channel_binding=require&", "?").replace("?channel_binding=require", "")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY", "")
 
@@ -2801,7 +2804,11 @@ def main():
     logger.info("🚀 ОЦІНКА24 Bot v6.0 | AI + 2FA + Security")
     logger.info(f"   Адмінів:  {len(ADMIN_IDS)} → {ADMIN_IDS}")
     logger.info(f"   Канал:    {CHANNEL_ID or '—'}")
-    logger.info(f"   БД:       {'✅' if DATABASE_URL else '—'}")
+    if DATABASE_URL:
+        _db_host = DATABASE_URL.split("@")[-1].split("/")[0]
+        logger.info(f"   БД:       ✅ хост: {_db_host}")
+    else:
+        logger.info("   БД:       — DATABASE_URL відсутній!")
     logger.info(f"   Groq AI:  {'✅' if GROQ_API_KEY else '—'}")
     build().run_polling(allowed_updates=Update.ALL_TYPES)
 
