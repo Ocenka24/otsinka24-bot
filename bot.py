@@ -74,7 +74,7 @@ assert BOT_TOKEN, "BOT_TOKEN відсутній у .env"
 
 # ── Стани ─────────────────────────────────────────────────
 (MENU, UPLOAD, LOC, VIDEOLOC, PHOTOGPS, PHONE,
- ADMIN, COMMENT, DELIVERY, AI_CHAT, ADMIN_2FA) = range(11)
+ ADMIN, COMMENT, DELIVERY, AI_CHAT, ADMIN_2FA, EST_AREA) = range(12)
 
 # ══════════════════════════════════════════════════════════
 #  БЕЗПЕКА: Rate limiting, flood, ban, 2FA
@@ -397,6 +397,52 @@ _PRICES_TEXT = (
 )
 
 # ══════════════════════════════════════════════════════════
+#  КАЛЬКУЛЯТОР ВАРТОСТІ КВАРТИРИ
+#  Середні ціни $/м² (вторинний ринок) — за даними
+#  dom.ria.com/uk/prodazha-kvartir/*/ceny, lun.ua/stat, ua.m2bomber.com/stat
+#  Оновлено: липень 2026. Для актуалізації змініть цифри нижче.
+# ══════════════════════════════════════════════════════════
+
+_CITY_PRICES: dict[str, tuple[str, int]] = {
+    # key: (назва, середня ціна $/м²)
+    "kyiv":       ("Київ",             1450),
+    "lviv":       ("Львів",            1400),
+    "uzhhorod":   ("Ужгород",          1150),
+    "ivfr":       ("Івано-Франківськ", 1050),
+    "odesa":      ("Одеса",             950),
+    "vinnytsia":  ("Вінниця",           950),
+    "chernivtsi": ("Чернівці",          950),
+    "khmel":      ("Хмельницький",      900),
+    "ternopil":   ("Тернопіль",         880),
+    "lutsk":      ("Луцьк",             880),
+    "dnipro":     ("Дніпро",            850),
+    "rivne":      ("Рівне",             820),
+    "poltava":    ("Полтава",           800),
+    "cherkasy":   ("Черкаси",           780),
+    "zhytomyr":   ("Житомир",           760),
+    "kropyv":     ("Кропивницький",     680),
+    "chernihiv":  ("Чернігів",          660),
+    "kharkiv":    ("Харків",            650),
+    "mykolaiv":   ("Миколаїв",          620),
+    "sumy":       ("Суми",              600),
+    "zaporizh":   ("Запоріжжя",         570),
+}
+
+_USD_UAH = 41.5  # курс для перерахунку в грн — оновлюйте за потреби
+
+
+def _est_city_kb() -> InlineKeyboardMarkup:
+    items = list(_CITY_PRICES.items())
+    rows = []
+    for i in range(0, len(items), 2):
+        row = [InlineKeyboardButton(items[i][1][0], callback_data=f"est|{items[i][0]}")]
+        if i + 1 < len(items):
+            row.append(InlineKeyboardButton(items[i+1][1][0], callback_data=f"est|{items[i+1][0]}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🏠 Головне меню", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+# ══════════════════════════════════════════════════════════
 #  КЛАВІАТУРИ
 # ══════════════════════════════════════════════════════════
 
@@ -408,6 +454,7 @@ def main_kb():
         [InlineKeyboardButton("🏡 Оцінка будинку",        callback_data="obj_house"),
          InlineKeyboardButton("🌿 Оцінка землі",          callback_data="obj_land")],
         [InlineKeyboardButton("🏭 Нежитлова нерухомість", callback_data="obj_nonres")],
+        [InlineKeyboardButton("📊 Орієнтовна вартість квартири", callback_data="est_calc")],
         [InlineKeyboardButton("💰 Ціни на оцінку",        callback_data="pre_info")],
         [InlineKeyboardButton("ℹ️ Про компанію",  callback_data="about"),
          InlineKeyboardButton("📞 Контакти",      callback_data="contact")],
@@ -438,6 +485,7 @@ def _start_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🤖 AI-консультант",        callback_data="ai_chat")],
         [InlineKeyboardButton("📋 Замовити оцінку",       callback_data="pre_order")],
+        [InlineKeyboardButton("📊 Орієнтовна вартість квартири", callback_data="est_calc")],
         [InlineKeyboardButton("💰 Ціни на оцінку",        callback_data="pre_info")],
         [InlineKeyboardButton("💬 Написати менеджеру",    callback_data="pre_write")],
     ]
@@ -814,6 +862,58 @@ async def handle_ai_chat(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return AI_CHAT
 
 
+async def handle_est_area(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    msg = upd.message
+    if not msg or not msg.text:
+        return EST_AREA
+
+    raw = msg.text.strip().replace(",", ".").replace("м²", "").replace("м2", "").strip()
+    try:
+        area = float(raw)
+    except ValueError:
+        await msg.reply_text("⚠️ Введіть площу числом, наприклад: 65 або 72.5")
+        return EST_AREA
+    if not 5 <= area <= 1000:
+        await msg.reply_text("⚠️ Площа має бути від 5 до 1000 м². Спробуйте ще раз:")
+        return EST_AREA
+
+    city_key = ctx.user_data.get("est_city")
+    if city_key not in _CITY_PRICES:
+        await msg.reply_text("Оберіть місто:", reply_markup=_est_city_kb())
+        return MENU
+
+    city_name, ppm = _CITY_PRICES[city_key]
+    mid_usd  = area * ppm
+    low_usd  = mid_usd * 0.85
+    high_usd = mid_usd * 1.15
+    mid_uah  = mid_usd * _USD_UAH
+
+    def _fmt(n: float) -> str:
+        return f"{int(round(n)):,}".replace(",", " ")
+
+    await msg.reply_text(
+        f"📊 *Орієнтовна вартість квартири*\n"
+        f"{'─'*28}\n"
+        f"🏙 Місто: *{city_name}*\n"
+        f"📐 Площа: *{area:g} м²*\n"
+        f"💵 Середня ціна: *${ppm}/м²*\n"
+        f"{'─'*28}\n"
+        f"💰 *${_fmt(low_usd)} – ${_fmt(high_usd)}*\n"
+        f"≈ *{_fmt(mid_uah)} грн* (середина діапазону)\n"
+        f"{'─'*28}\n"
+        "⚠️ Це попередній розрахунок за середніми цінами ринку. "
+        "Точну вартість визначає сертифікований оцінювач з урахуванням "
+        "стану, поверху, ремонту та розташування.\n\n"
+        "Замовте офіційну оцінку — звіт за 1 день:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Замовити оцінку квартири", callback_data="obj_flat")],
+            [InlineKeyboardButton("🔄 Інше місто", callback_data="est_calc"),
+             InlineKeyboardButton("🏠 Меню",       callback_data="home")],
+        ]))
+    return MENU
+
+
 async def _open_object_by_key(upd: Update, ctx: ContextTypes.DEFAULT_TYPE,
                               key: str, purpose: str = "") -> int:
     icon, name, docs, _base_price, _base_term = OBJECTS[key]
@@ -1039,6 +1139,29 @@ async def on_menu(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             [InlineKeyboardButton("◀️ Назад",           callback_data="home")],
         ]))
         return MENU
+
+    # Калькулятор вартості квартири
+    if d == "est_calc":
+        await send(
+            "📊 *Орієнтовна вартість квартири*\n\n"
+            "Розрахунок за середніми цінами вторинного ринку "
+            "(дані DOM.RIA, ЛУН, M2bomber).\n\n"
+            "Оберіть місто:",
+            _est_city_kb())
+        return MENU
+
+    if d.startswith("est|"):
+        city_key = d.split("|", 1)[1]
+        if city_key not in _CITY_PRICES:
+            await send("⚠️ Місто не знайдено. Оберіть зі списку:", _est_city_kb())
+            return MENU
+        ctx.user_data["est_city"] = city_key
+        city_name, ppm = _CITY_PRICES[city_key]
+        await send(
+            f"🏙 *{city_name}* — середня ціна: *${ppm}/м²*\n\n"
+            "Введіть площу квартири в м² (наприклад: 65):",
+            InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Інше місто", callback_data="est_calc")]]))
+        return EST_AREA
 
     if d == "pre_write":
         u2 = upd.effective_user
@@ -2640,6 +2763,10 @@ def build():
             AI_CHAT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_ai_chat),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, handle_file),
+                CallbackQueryHandler(on_menu),
+            ],
+            EST_AREA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_est_area),
                 CallbackQueryHandler(on_menu),
             ],
             ADMIN: [
